@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,171 +11,117 @@ PRODUCT_FILE = BASE_DIR / "data" / "products.json"
 class ProductService:
 
     def __init__(self):
-        self.products = self._load_products()
-
-    def _load_products(self) -> list[dict[str, Any]]:
-        if not PRODUCT_FILE.exists():
-            raise FileNotFoundError(
-                f"Products file not found: {PRODUCT_FILE}"
-            )
-
-        with open(PRODUCT_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
-
-        if not isinstance(data, list):
-            raise ValueError(
-                "products.json must contain a JSON array."
-            )
-
-        return data
-
-    def get_product_by_id(
-        self,
-        product_id: str,
-    ) -> dict[str, Any] | None:
-
-        product_id = product_id.strip().lower()
-
-        for product in self.products:
-            current_id = str(
-                product.get("product_id", "")
-            ).strip().lower()
-
-            if current_id == product_id:
-                return product
-
-        return None
+        with open(
+            PRODUCT_FILE,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            self.products: list[dict[str, Any]] = json.load(file)
 
     def search_products(
         self,
-        query: str = "",
-        *,
-        material: str | None = None,
-        category: str | None = None,
-        year: int | None = None,
-        min_price: float | None = None,
-        max_price: float | None = None,
-        in_stock_only: bool = True,
-        limit: int = 5,
+        query: str,
+        limit: int = 10,
     ) -> list[dict[str, Any]]:
 
-        products = list(self.products)
+        query_lower = query.lower().strip()
 
-        # Structured filters
+        # -----------------------------------
+        # 1. Understand important filters
+        # -----------------------------------
 
-        if material:
-            material = material.strip().lower()
+        year = self._extract_year(query_lower)
+        max_price = self._extract_max_price(query_lower)
+        material = self._extract_material(query_lower)
 
-            products = [
-                product
-                for product in products
-                if str(
+        wants_uae = "uae" in query_lower
+
+        wants_in_stock = (
+            "in stock" in query_lower
+            or "available" in query_lower
+            or "availability" in query_lower
+        )
+
+        results = []
+
+        # -----------------------------------
+        # 2. Check every product
+        # -----------------------------------
+
+        for product in self.products:
+
+            # YEAR
+            if year is not None:
+                if product.get("year") != year:
+                    continue
+
+            # MATERIAL
+            if material is not None:
+                product_material = str(
                     product.get("material", "")
-                ).strip().lower() == material
-            ]
+                ).lower()
 
-        if category:
-            category = category.strip().lower()
+                if product_material != material:
+                    continue
 
-            products = [
-                product
-                for product in products
-                if category
-                in str(
-                    product.get("category", "")
-                ).strip().lower()
-            ]
+            # PRICE
+            if max_price is not None:
+                try:
+                    price = float(
+                        product.get("price", 0)
+                    )
+                except (TypeError, ValueError):
+                    continue
 
-        if year is not None:
-            products = [
-                product
-                for product in products
-                if product.get("year") == year
-            ]
+                if price > max_price:
+                    continue
 
-        if min_price is not None:
-            products = [
-                product
-                for product in products
-                if self._get_price(product) >= min_price
-            ]
+            # STOCK
+            if wants_in_stock:
+                try:
+                    stock = int(
+                        product.get("stock", 0)
+                    )
+                except (TypeError, ValueError):
+                    stock = 0
 
-        if max_price is not None:
-            products = [
-                product
-                for product in products
-                if self._get_price(product) <= max_price
-            ]
+                if stock <= 0:
+                    continue
 
-        if in_stock_only:
-            products = [
-                product
-                for product in products
-                if self._get_stock(product) > 0
-            ]
+            # UAE relevance
+            if wants_uae:
+                searchable_text = self._product_text(product)
 
-        # If there is no text query,
-        # return the structured-filter results.
-        query = query.strip().lower()
+                if "uae" not in searchable_text:
+                    continue
 
-        if not query:
-            return products[:limit]
+            results.append(product)
 
-        # Text relevance scoring
-
-        query_words = [
-            word
-            for word in query.split()
-            if len(word) > 1
-        ]
+        # -----------------------------------
+        # 3. Rank remaining valid products
+        # -----------------------------------
 
         scored_products = []
 
-        for product in products:
+        query_words = self._useful_words(
+            query_lower
+        )
 
-            name = str(
-                product.get("name", "")
-            ).lower()
+        for product in results:
 
-            category_text = str(
-                product.get("category", "")
-            ).lower()
+            searchable_text = self._product_text(
+                product
+            )
 
-            material_text = str(
-                product.get("material", "")
-            ).lower()
+            score = sum(
+                1
+                for word in query_words
+                if word in searchable_text
+            )
 
-            description = str(
-                product.get("description", "")
-            ).lower()
-
-            year_text = str(
-                product.get("year", "")
-            ).lower()
-
-            score = 0
-
-            for word in query_words:
-
-                if word in name:
-                    score += 5
-
-                if word in material_text:
-                    score += 4
-
-                if word in category_text:
-                    score += 3
-
-                if word in description:
-                    score += 2
-
-                if word in year_text:
-                    score += 1
-
-            if score > 0:
-                scored_products.append(
-                    (score, product)
-                )
+            scored_products.append(
+                (score, product)
+            )
 
         scored_products.sort(
             key=lambda item: item[0],
@@ -188,24 +135,140 @@ class ProductService:
         ]
 
     @staticmethod
-    def _get_price(product: dict[str, Any],) -> float:
+    def _extract_year(
+        query: str,
+    ) -> int | None:
 
-        try:
-            return float(
-                product.get("price", 0)
-            )
-        except (TypeError, ValueError):
-            return 0.0
+        match = re.search(
+            r"\b(19|20)\d{2}\b",
+            query,
+        )
+
+        if not match:
+            return None
+
+        return int(match.group())
 
     @staticmethod
-    def _get_stock(product: dict[str, Any],) -> int:
+    def _extract_max_price(
+        query: str,
+    ) -> float | None:
 
-        try:
-            return int(
-                product.get("stock", 0)
+        patterns = [
+            r"budget(?:\s+is|\s+of)?\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
+            r"under\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
+            r"below\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
+            r"less than\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
+            r"up to\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
+            r"maximum\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
+            r"max\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
+        ]
+
+        for pattern in patterns:
+            match = re.search(
+                pattern,
+                query,
+                re.IGNORECASE,
             )
-        except (TypeError, ValueError):
-            return 0
+
+            if match:
+                return float(
+                    match.group(1)
+                )
+
+        # Handles:
+        # "500 AED budget"
+        match = re.search(
+            r"(\d+(?:\.\d+)?)\s*aed",
+            query,
+            re.IGNORECASE,
+        )
+
+        if match and (
+            "budget" in query
+            or "under" in query
+            or "below" in query
+            or "maximum" in query
+        ):
+            return float(
+                match.group(1)
+            )
+
+        return None
+
+    @staticmethod
+    def _extract_material(
+        query: str,
+    ) -> str | None:
+
+        materials = [
+            "silver",
+            "gold",
+            "copper",
+            "bronze",
+            "platinum",
+        ]
+
+        for material in materials:
+            if material in query:
+                return material
+
+        return None
+
+    @staticmethod
+    def _product_text(
+        product: dict[str, Any],
+    ) -> str:
+
+        return " ".join([
+            str(product.get("name", "")),
+            str(product.get("category", "")),
+            str(product.get("material", "")),
+            str(product.get("year", "")),
+            str(product.get("description", "")),
+        ]).lower()
+
+    @staticmethod
+    def _useful_words(
+        query: str,
+    ) -> list[str]:
+
+        ignored_words = {
+            "i",
+            "am",
+            "a",
+            "an",
+            "the",
+            "for",
+            "from",
+            "my",
+            "is",
+            "are",
+            "show",
+            "me",
+            "all",
+            "looking",
+            "want",
+            "and",
+            "that",
+            "them",
+            "between",
+            "explain",
+            "available",
+            "in",
+            "stock",
+            "aed",
+        }
+
+        return [
+            word
+            for word in re.findall(
+                r"[a-z0-9]+",
+                query,
+            )
+            if len(word) > 1
+            and word not in ignored_words
+        ]
 
 
 product_service = ProductService()

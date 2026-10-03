@@ -9,7 +9,6 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str
 
     SHOPIFY_STORE_DOMAIN: str
-    SHOPIFY_ADMIN_ACCESS_TOKEN: str
 
     model_config = SettingsConfigDict(
         env_file=".env",

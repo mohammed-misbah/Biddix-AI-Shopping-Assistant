@@ -15,23 +15,31 @@ class ChatService:
         if not session_id:
             session_id = str(uuid.uuid4())
 
-        # 1. Search products locally
         products = product_service.search_products(
             query=message,
-            limit=5,
+            limit=10,
         )
 
-        # 2. Send only matched products to Gemini
         answer = await llm_service.generate_response(
             user_message=message,
             products=products,
         )
 
-        # 3. Return response
+        response_products = [
+            {
+                "product_id": product.get("product_id"),
+                "name": product.get("name"),
+                "price": product.get("price"),
+                "currency": product.get("currency"),
+                "product_url": product.get("product_url"),
+            }
+            for product in products
+        ]
+
         return {
             "answer": answer,
             "session_id": session_id,
-            "products": products,
+            "products": response_products,
         }
 
 
