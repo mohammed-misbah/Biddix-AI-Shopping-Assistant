@@ -1,0 +1,477 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;450;500;550;600;700&family=Libre+Caslon+Display&display=swap');
+#biddix-app {
+  --paper:#f7f6f0;
+  --ink:#243d33;
+  --muted:#6d746d;
+  --line:#d9dcd2;
+  --gold:#a1834e;
+  font-family:'DM Sans',Arial,sans-serif;
+  color:var(--ink);
+  background:var(--paper);
+  font-size:14px;
+  line-height:1.5}
+#biddix-app * {
+  box-sizing:border-box}
+#biddix-app button,#biddix-app textarea {
+  font:inherit;
+  color:inherit}
+#biddix-app button {
+  cursor:pointer;
+  background:none;
+  border:0}
+#biddix-app a {
+  color:inherit;
+  text-decoration:none}
+#biddix-app button:focus-visible,#biddix-app a:focus-visible,#biddix-app textarea:focus-visible {
+  outline:2px solid #a1834e;
+  outline-offset:5px}
+#biddix-app h1,#biddix-app h2,#biddix-app h3,#biddix-app p {
+  margin:0}
+#biddix-app [hidden] {
+  display:none!important}
+.bx-eyebrow {
+  text-transform:uppercase;
+  letter-spacing:1.6px;
+  font-size:9px;
+  font-weight:550;
+  display:block;
+  color:var(--muted)}
+.bx-coin-photo {
+  overflow:hidden;
+  background:#eeece3;
+  aspect-ratio:1}
+.bx-coin-photo img {
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  transition:transform .6s}
+.bx-coin-photo.falcon img {
+  object-position:70% center;
+  transform:scale(1.35)}
+.bx-coin-photo.palm img {
+  object-position:20% center;
+  transform:scale(1.7);
+  filter:sepia(.24)}
+.bx-coin-photo.oryx img {
+  transform:scale(1.5);
+  filter:grayscale(.7)}
+.bx-coin-photo.jubilee img {
+  transform:scale(1.25);
+  filter:sepia(.22)}
+.bx-trigger {
+  position:fixed;
+  right:28px;
+  bottom:26px;
+  z-index:15;
+  background:#243d33!important;
+  color:#fff!important;
+  display:flex;
+  align-items:center;
+  gap:17px;
+  padding:15px 20px!important;
+  box-shadow:0 8px 28px #243d3326;
+  transition:transform .25s}
+.bx-trigger:hover {
+  transform:translateY(-3px)}
+.bx-trigger-mark {
+  font:34px 'Libre Caslon Display',Georgia,serif;
+  border-right:1px solid #ffffff30;
+  padding-right:17px}
+.bx-trigger strong {
+  display:block;
+  font-size:12px;
+  font-weight:500;
+  text-align:left;
+  letter-spacing:.7px}
+.bx-trigger small {
+  display:block;
+  font-size:9px;
+  opacity:.7;
+  margin-top:2px}
+.bx-live-dot,.bx-panel-status i {
+  display:inline-block;
+  width:5px;
+  height:5px;
+  background:#b5b891;
+  border-radius:50%}
+.bx-live-dot {
+  margin-left:8px;
+  animation:quiet 3s ease-in-out infinite}
+@keyframes quiet {
+  50% {
+  opacity:.4}
+}
+.bx-backdrop {
+  position:fixed;
+  inset:0;
+  background:transparent;
+  z-index:20}
+.bx-panel {
+  position:fixed;
+  top:0;
+  right:0;
+  width:460px;
+  max-width:100%;
+  height:100dvh;
+  background:#faf9f4;
+  z-index:30;
+  display:flex;
+  flex-direction:column;
+  transform:translateX(101%);
+  transition:transform .32s ease;
+  box-shadow:-10px 0 60px #26382915}
+.bx-panel.is-open {
+  transform:translateX(0)}
+.bx-panel-header {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:27px 30px 21px}
+.bx-panel-header strong {
+  font:37px 'Libre Caslon Display',Georgia,serif;
+  letter-spacing:-1px;
+  display:block;
+  line-height:1}
+.bx-panel-header>div>span {
+  font-size:9px;
+  letter-spacing:.6px;
+  display:block;
+  margin-top:7px;
+  color:var(--muted)}
+.bx-panel-controls {
+  display:flex;
+  gap:10px}
+.bx-panel-controls button {
+  font-size:25px!important;
+  font-weight:400;
+  padding:4px 7px!important;
+  color:#757c70!important}
+.bx-panel-status {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  border-block:1px solid var(--line);
+  padding:11px 30px;
+  font-size:8px;
+  letter-spacing:.6px;
+  color:var(--muted)}
+.bx-panel-status i {
+  margin-right:6px}
+.bx-feed {
+  padding:0 30px;
+  overflow-y:auto;
+  flex:1;
+  overscroll-behavior:contain;
+  scrollbar-width:thin}
+.bx-welcome {
+  padding-top:34px}
+.bx-welcome-mark {
+  font-size:38px;
+  color:#a18c5d;
+  margin-bottom:20px;
+  line-height:1}
+.bx-welcome>.bx-eyebrow {
+  font-size:7px;
+  letter-spacing:1.45px}
+.bx-welcome h2 {
+  font:64px/.99 'Libre Caslon Display',Georgia,serif;
+  letter-spacing:-1.5px;
+  margin:18px 0 20px!important}
+.bx-welcome h2>span {
+  color:#a18c5d}
+.bx-welcome>p {
+  font-size:12px;
+  line-height:1.9;
+  color:#6d746b}
+.bx-section-label {
+  font-size:8px;
+  letter-spacing:1.2px;
+  text-transform:uppercase;
+  margin:33px 0 13px;
+  color:#848775}
+.bx-suggestions button {
+  display:flex;
+  align-items:center;
+  text-align:left;
+  width:100%;
+  border-top:1px solid var(--line)!important;
+  padding:13px 0!important;
+  font-size:12px!important;
+  transition:padding .2s}
+.bx-suggestions button:hover {
+  padding-left:6px!important}
+.bx-suggestions button:last-child {
+  border-bottom:1px solid var(--line)!important}
+.bx-index {
+  font-size:8px;
+  color:#8b8c7c;
+  width:30px}
+.bx-suggestions button>span:last-child {
+  margin-left:auto;
+  color:#a18c5d}
+.bx-service-note {
+  display:flex;
+  gap:13px;
+  align-items:center;
+  margin:26px 0 28px;
+  color:#92927f}
+.bx-service-note>span {
+  font-size:25px}
+.bx-service-note p {
+  font-size:9px;
+  line-height:1.8}
+.bx-composer-wrap {
+  padding:13px 30px 18px;
+  border-top:1px solid var(--line);
+  background:#faf9f4}
+.bx-composer {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  border-bottom:1px solid #929b87;
+  padding:8px 0 14px}
+.bx-composer textarea {
+  border:0;
+  background:transparent;
+  resize:none;
+  flex:1;
+  min-width:0;
+  font-size:11px!important;
+  line-height:23px;
+  outline:none}
+.bx-composer textarea::placeholder {
+  color:#828778}
+.bx-composer button {
+  background:#243d33!important;
+  color:white!important;
+  width:32px;
+  height:32px;
+  flex-shrink:0;
+  font-size:22px!important;
+  transition:transform .2s}
+.bx-composer button:hover {
+  transform:translateY(-2px)}
+.bx-composer button:disabled {
+  opacity:.4}
+.bx-composer-note {
+  display:flex;
+  justify-content:space-between;
+  margin-top:12px;
+  color:#8b8b7c;
+  font-size:7px}
+.bx-composer-note button {
+  font-size:8px!important;
+  padding:0}
+.bx-start-over {
+  font-size:8px!important;
+  color:var(--muted)!important;
+  padding:0 0 7px!important}
+.bx-customer {
+  margin:27px 0 30px;
+  border-left:2px solid #b5b397;
+  padding-left:14px}
+.bx-customer p {
+  font-size:14px;
+  margin-top:7px!important;
+  white-space:pre-wrap}
+.bx-response {
+  padding-bottom:25px;
+  animation:reveal .3s ease}
+.bx-response>p {
+  font-size:13px;
+  line-height:1.8;
+  margin:9px 0 19px!important;
+  white-space:pre-wrap}
+.bx-result {
+  display:grid;
+  grid-template-columns:115px 1fr;
+  gap:20px;
+  padding:20px 0;
+  border-top:1px solid var(--line);
+  animation:reveal .4s ease}
+.bx-result .bx-coin-photo {
+  height:140px;
+  aspect-ratio:auto}
+.bx-result h3 {
+  font:28px 'Libre Caslon Display',Georgia,serif;
+  margin:5px 0 3px!important}
+.bx-result p {
+  font-size:9px;
+  color:var(--muted)}
+.bx-result strong {
+  display:block;
+  font-size:12px;
+  font-weight:500;
+  margin-top:10px}
+.bx-availability {
+  font-size:8px;
+  color:#78846b;
+  display:block;
+  margin-top:3px}
+.bx-text-link {
+  padding:0!important;
+  font-size:10px!important;
+  margin-top:12px;
+  border-bottom:1px solid #91977e!important;
+  padding-bottom:3px!important}
+.bx-text-link span {
+  margin-left:8px}
+.bx-feedback {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  font-size:8px;
+  color:#838678;
+  margin-top:18px}
+.bx-feedback button {
+  font-size:8px!important;
+  padding:3px}
+.bx-context {
+  display:flex;
+  align-items:center;
+  gap:12px;
+  margin:14px 30px 0;
+  padding-bottom:14px;
+  border-bottom:1px solid var(--line)}
+.bx-context .bx-coin-photo {
+  width:44px;
+  height:44px}
+.bx-context strong {
+  display:block;
+  font-size:11px;
+  font-weight:500;
+  margin-top:3px}
+.bx-context .bx-eyebrow {
+  font-size:7px}
+.bx-context button {
+  margin-left:auto;
+  font-size:19px!important}
+.bx-comparison table {
+  width:100%;
+  border-collapse:collapse;
+  font-size:10px;
+  margin-top:18px}
+.bx-comparison th {
+  font-weight:400;
+  text-align:left}
+.bx-comparison td {
+  width:31%}
+.bx-comparison td,.bx-comparison th {
+  border-bottom:1px solid var(--line);
+  padding:10px 4px}
+.bx-comparison thead {
+  font-size:8px;
+  color:var(--muted)}
+.bx-compare-images {
+  display:grid;
+  grid-template-columns:38% 31% 31%;
+  gap:0}
+.bx-compare-images .bx-coin-photo {
+  margin:0 4px 8px}
+.bx-compare-images strong {
+  font:18px 'Libre Caslon Display',Georgia,serif}
+.bx-recommendation {
+  border-left:2px solid #a18c5d;
+  padding-left:13px}
+.bx-loading {
+  margin:22px 0;
+  font-size:9px;
+  color:var(--muted)}
+.bx-loading>div {
+  height:1px;
+  background:var(--line);
+  margin-top:13px;
+  position:relative;
+  overflow:hidden}
+.bx-loading>div:after {
+  content:'';
+  display:block;
+  width:35%;
+  height:1px;
+  background:#a18c5d;
+  animation:search 1.4s infinite}
+@keyframes search {
+  from {
+  transform:translateX(-100%)}
+to {
+  transform:translateX(390%)}
+}
+@keyframes reveal {
+  from {
+  opacity:0;
+  transform:translateY(5px)}
+to {
+  opacity:1;
+  transform:none}
+}
+.bx-empty,.bx-error {
+  padding:22px 0;
+  border-top:1px solid var(--line);
+  font-size:12px;
+  line-height:1.8}
+.bx-empty>span {
+  font:26px 'Libre Caslon Display',Georgia,serif}
+.bx-empty>p {
+  margin-top:8px!important;
+  font-size:11px;
+  color:var(--muted)}
+.bx-demo-controls {
+  display:flex;
+  gap:9px;
+  flex-wrap:wrap;
+  font-size:8px;
+  border-top:1px solid var(--line);
+  margin-top:12px;
+  padding-top:12px}
+.bx-demo-controls button {
+  text-decoration:underline}
+.bx-sr {
+  position:absolute;
+  width:1px;
+  height:1px;
+  overflow:hidden;
+  clip:rect(0,0,0,0);
+  white-space:nowrap}
+
+@media(max-width:700px) {
+  .bx-trigger {
+  right:16px;
+  bottom:16px;
+  padding:12px 16px!important}
+.bx-panel {
+  width:100%;
+  max-width:480px}
+.bx-panel-header {
+  padding:22px 25px 19px}
+.bx-panel-status {
+  padding:10px 25px}
+.bx-feed {
+  padding:0 25px}
+.bx-welcome {
+  padding-top:26px}
+.bx-welcome h2 {
+  font-size:60px}
+.bx-welcome-mark {
+  margin-bottom:17px}
+.bx-composer-wrap {
+  padding:10px 25px max(16px,env(safe-area-inset-bottom))}
+.bx-composer textarea {
+  font-size:16px!important}
+.bx-context {
+  margin-inline:25px}
+.bx-service-note {
+  margin:20px 0}
+.bx-section-label {
+  margin-top:25px}
+}
+
+@media(prefers-reduced-motion:reduce) {
+  #biddix-app *,#biddix-app *:before,#biddix-app *:after {
+  animation:none!important;
+  transition:none!important;
+  scroll-behavior:auto!important}
+}
+
+
+/* Preview only: do not apply this class to your production storefront. */
+body.biddix-preview { margin: 0; background: #f3f3f0; }
