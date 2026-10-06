@@ -29,8 +29,14 @@ class ChatService:
             {
                 "product_id": product.get("product_id"),
                 "name": product.get("name"),
+                "category": product.get("category"),
+                "year": product.get("year"),
+                "material": product.get("material"),
+                "weight": product.get("weight"),
+                "purity": product.get("purity"),
                 "price": product.get("price"),
                 "currency": product.get("currency"),
+                "description": product.get("description"),
                 "product_url": product.get("product_url"),
             }
             for product in products

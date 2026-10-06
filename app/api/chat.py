@@ -1,8 +1,12 @@
+import logging
+
 from fastapi import APIRouter, HTTPException
-from google.genai.errors import ServerError
 
 from schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_service import chat_service
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -13,6 +17,7 @@ router = APIRouter(
 
 @router.post("", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+
     try:
         result = await chat_service.chat(
             message=request.message,
@@ -21,14 +26,13 @@ async def chat(request: ChatRequest):
 
         return ChatResponse(**result)
 
-    except ServerError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Gemini is temporarily busy. Please try again in a moment.",
-        ) from exc
-
     except Exception as exc:
+        logger.exception(
+            "Chat endpoint failed: %s",
+            exc,
+        )
+
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="Unable to process chat request.",
         ) from exc
