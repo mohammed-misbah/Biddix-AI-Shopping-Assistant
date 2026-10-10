@@ -1,7 +1,7 @@
 import uuid
 
 from app.services.llm_service import llm_service
-from app.services.product_service import product_service
+from app.services.retrieval_service import retrieval_service
 
 
 class ChatService:
@@ -15,7 +15,7 @@ class ChatService:
         if not session_id:
             session_id = str(uuid.uuid4())
 
-        products = product_service.search_products(
+        products = retrieval_service.retrieve(
             query=message,
             limit=5,
         )
