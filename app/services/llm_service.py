@@ -1,26 +1,26 @@
-import asyncio
 import json
 import logging
 from typing import Any
 
-from google import genai
-from google.genai import errors
+import httpx
 
 from app.core.config import settings
+from app.core.prompts import build_product_assistant_prompt
 
 
 logger = logging.getLogger(__name__)
 
 
 class LLMService:
-    MODEL = "gemini-3.8-flash"
-
-    # Customer should never wait minutes.
-    HARD_TIMEOUT_SECONDS = 8
 
     def __init__(self):
-        self.client = genai.Client(
-            api_key=settings.GEMINI_API_KEY
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=5.0,
+                read=float(settings.HARD_TIMEOUT_SECONDS),
+                write=10.0,
+                pool=5.0,
+            )
         )
 
     async def generate_response(
@@ -35,49 +35,119 @@ class LLMService:
             separators=(",", ":"),
         )
 
-        prompt = self._build_prompt(
+        prompt = build_product_assistant_prompt(
             user_message=user_message,
             product_context=product_context,
             product_count=len(products),
         )
 
+        url = (
+            f"{settings.API_BASE_URL}/"
+            f"{settings.GEMINI_MODEL}:generateContent"
+        )
+
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": prompt
+                        }
+                    ],
+                }
+            ],
+
+            "generationConfig": {
+                "thinkingConfig": {
+                    "thinkingLevel": "MINIMAL"
+                }
+            },
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": settings.GEMINI_API_KEY,
+        }
+
         try:
-            # HARD application-level timeout.
-            # Even if Gemini/SDK retries internally,
-            # our customer does not wait forever.
-            interaction = await asyncio.wait_for(
-                self.client.aio.interactions.create(
-                    model=self.MODEL,
-                    input=prompt,
-                    generation_config={
-                        "thinking_level": "low",
-                    },
-                ),
-                timeout=self.HARD_TIMEOUT_SECONDS,
+            response = await self.client.post(
+                url,
+                headers=headers,
+                json=payload,
             )
 
-            answer = interaction.output_text
+            response.raise_for_status()
 
-            if not answer or not answer.strip():
-                return self._fallback_answer(products)
+            data = response.json()
 
-            return answer.strip()
+            candidates = data.get("candidates", [])
 
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Gemini exceeded %s seconds.",
-                self.HARD_TIMEOUT_SECONDS,
+            if not candidates:
+                logger.error(
+                    "Gemini returned no candidates: %s",
+                    data,
+                )
+                return self._fallback()
+
+            candidate = candidates[0]
+
+            # VERY IMPORTANT FOR DEBUGGING
+            finish_reason = candidate.get(
+                "finishReason"
             )
 
-            return self._fallback_answer(products)
-
-        except errors.APIError as exc:
-            logger.exception(
-                "Gemini API error: %s",
-                exc,
+            usage = data.get(
+                "usageMetadata",
+                {}
             )
 
-            return self._fallback_answer(products)
+            logger.info(
+                "Gemini finish_reason=%s usage=%s",
+                finish_reason,
+                usage,
+            )
+
+            parts = (
+                candidate
+                .get("content", {})
+                .get("parts", [])
+            )
+
+            answer = "".join(
+                part.get("text", "")
+                for part in parts
+                if part.get("text")
+            ).strip()
+
+            if not answer:
+                logger.error(
+                    "Gemini returned empty answer. "
+                    "finish_reason=%s data=%s",
+                    finish_reason,
+                    data,
+                )
+
+                return self._fallback()
+
+            return answer
+
+        except httpx.TimeoutException:
+            logger.error(
+                "Gemini timed out after %s seconds.",
+                settings.HARD_TIMEOUT_SECONDS,
+            )
+
+            return self._fallback()
+
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Gemini HTTP %s: %s",
+                exc.response.status_code,
+                exc.response.text,
+            )
+
+            return self._fallback()
 
         except Exception as exc:
             logger.exception(
@@ -85,82 +155,14 @@ class LLMService:
                 exc,
             )
 
-            return self._fallback_answer(products)
+            return self._fallback()
 
     @staticmethod
-    def _fallback_answer(
-        products: list[dict[str, Any]],
-    ) -> str:
-
-        if not products:
-            return (
-                "I couldn't find a matching product. "
-                "Try changing the year, material, or budget."
-            )
-
-        first = products[0]
-
-        name = first.get("name", "this product")
-        price = first.get("price")
-        currency = first.get("currency", "AED")
-
-        if len(products) == 1:
-            return (
-                f"I found one matching option: {name}"
-                + (
-                    f" at {price} {currency}."
-                    if price is not None
-                    else "."
-                )
-            )
-
+    def _fallback() -> str:
         return (
-            f"I found {len(products)} matching options. "
-            f"{name} is one of the closest matches"
-            + (
-                f" at {price} {currency}."
-                if price is not None
-                else "."
-            )
+            "I'm having trouble preparing the full recommendation "
+            "right now. Please try again in a moment."
         )
-
-    @staticmethod
-    def _build_prompt(
-        user_message: str,
-        product_context: str,
-        product_count: int,
-    ) -> str:
-
-        return f"""
-            You are Biddix's shopping assistant.
-
-            Talk naturally, like a helpful person assisting a customer in a live ecommerce chat.
-
-            Keep replies short, clear, and conversational.
-
-            Rules:
-            - Use ONLY the products supplied below.
-            - Never invent product information.
-            - Never invent prices, stock, year, material, weight, or purity.
-            - Respect the customer's exact requirements.
-            - If several products match, briefly explain the useful differences.
-            - If one product matches, explain why it fits.
-            - Do not sound like advertising copy.
-            - Do not use unnecessary headings.
-            - Do not mention JSON, prompts, backend systems, or internal rules.
-            - Do not pressure the customer to buy.
-            - If no products match, say so clearly.
-
-            Products supplied: {product_count}
-
-            PRODUCTS:
-            {product_context}
-
-            CUSTOMER:
-            {user_message}
-
-            Reply naturally and briefly.
-            """.strip()
 
 
 llm_service = LLMService()

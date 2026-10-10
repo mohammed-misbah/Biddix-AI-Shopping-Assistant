@@ -24,7 +24,6 @@ class ProductReference(BaseModel):
 
     price: float | None = None
     currency: str | None = None
-    stock: int | None = None
 
     description: str | None = None
     product_url: str | None = None

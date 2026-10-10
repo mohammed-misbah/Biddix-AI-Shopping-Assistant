@@ -17,7 +17,7 @@ class ChatService:
 
         products = product_service.search_products(
             query=message,
-            limit=10,
+            limit=5,
         )
 
         answer = await llm_service.generate_response(
