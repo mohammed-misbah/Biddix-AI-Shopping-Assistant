@@ -69,9 +69,7 @@ class RetrievalService:
 
     def __init__(self) -> None:
 
-        # -----------------------------------------
         # Validate vector files
-        # -----------------------------------------
 
         if not INDEX_FILE.exists():
             raise FileNotFoundError(
@@ -85,17 +83,12 @@ class RetrievalService:
                 "Run: python -m scripts.index_products"
             )
 
-        # -----------------------------------------
         # Load FAISS
-        # -----------------------------------------
-
         self.index = faiss.read_index(
             str(INDEX_FILE)
         )
 
-        # -----------------------------------------
         # Load metadata
-        # -----------------------------------------
 
         with open(
             METADATA_FILE,
@@ -104,18 +97,14 @@ class RetrievalService:
         ) as file:
             self.metadata = json.load(file)
 
-        # -----------------------------------------
         # Full product lookup
-        # -----------------------------------------
 
         self.products_by_id = {
             str(product["product_id"]): product
             for product in product_service.products
         }
 
-        # -----------------------------------------
         # Safety checks
-        # -----------------------------------------
 
         if self.index.ntotal != len(
             self.metadata
