@@ -5,7 +5,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
-from app.core.prompts import build_product_assistant_prompt
+from app.core.prompts import build_assistant_prompt
 
 
 logger = logging.getLogger(__name__)
@@ -14,10 +14,13 @@ logger = logging.getLogger(__name__)
 class LLMService:
 
     def __init__(self):
+
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(
                 connect=5.0,
-                read=float(settings.HARD_TIMEOUT_SECONDS),
+                read=float(
+                    settings.HARD_TIMEOUT_SECONDS
+                ),
                 write=10.0,
                 pool=5.0,
             )
@@ -27,6 +30,7 @@ class LLMService:
         self,
         user_message: str,
         products: list[dict[str, Any]],
+        mode: str,
     ) -> str:
 
         product_context = json.dumps(
@@ -35,8 +39,9 @@ class LLMService:
             separators=(",", ":"),
         )
 
-        prompt = build_product_assistant_prompt(
+        prompt = build_assistant_prompt(
             user_message=user_message,
+            mode=mode,
             product_context=product_context,
             product_count=len(products),
         )
@@ -57,7 +62,6 @@ class LLMService:
                     ],
                 }
             ],
-
             "generationConfig": {
                 "thinkingConfig": {
                     "thinkingLevel": "MINIMAL"
@@ -67,10 +71,12 @@ class LLMService:
 
         headers = {
             "Content-Type": "application/json",
-            "x-goog-api-key": settings.GEMINI_API_KEY,
+            "x-goog-api-key":
+                settings.GEMINI_API_KEY,
         }
 
         try:
+
             response = await self.client.post(
                 url,
                 headers=headers,
@@ -81,25 +87,28 @@ class LLMService:
 
             data = response.json()
 
-            candidates = data.get("candidates", [])
+            candidates = data.get(
+                "candidates",
+                [],
+            )
 
             if not candidates:
                 logger.error(
                     "Gemini returned no candidates: %s",
                     data,
                 )
+
                 return self._fallback()
 
             candidate = candidates[0]
 
-            # VERY IMPORTANT FOR DEBUGGING
             finish_reason = candidate.get(
                 "finishReason"
             )
 
             usage = data.get(
                 "usageMetadata",
-                {}
+                {},
             )
 
             logger.info(
@@ -121,11 +130,11 @@ class LLMService:
             ).strip()
 
             if not answer:
+
                 logger.error(
                     "Gemini returned empty answer. "
-                    "finish_reason=%s data=%s",
+                    "finish_reason=%s",
                     finish_reason,
-                    data,
                 )
 
                 return self._fallback()
@@ -133,6 +142,7 @@ class LLMService:
             return answer
 
         except httpx.TimeoutException:
+
             logger.error(
                 "Gemini timed out after %s seconds.",
                 settings.HARD_TIMEOUT_SECONDS,
@@ -141,6 +151,7 @@ class LLMService:
             return self._fallback()
 
         except httpx.HTTPStatusError as exc:
+
             logger.error(
                 "Gemini HTTP %s: %s",
                 exc.response.status_code,
@@ -150,6 +161,7 @@ class LLMService:
             return self._fallback()
 
         except Exception as exc:
+
             logger.exception(
                 "Unexpected Gemini error: %s",
                 exc,
@@ -159,8 +171,9 @@ class LLMService:
 
     @staticmethod
     def _fallback() -> str:
+
         return (
-            "I'm having trouble preparing the full recommendation "
+            "I'm having trouble preparing the answer "
             "right now. Please try again in a moment."
         )
 

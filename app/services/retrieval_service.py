@@ -22,13 +22,14 @@ logger = logging.getLogger(__name__)
 
 class RetrievalService:
 
-    # Very weak semantic matches are ignored.
-    #
-    # Do not make this too high initially.
-    # Tune it later using real customer queries.
     MIN_SEMANTIC_SCORE = 0.25
 
-    # Words that usually provide little ranking value.
+    # For explicit inventory questions such as:
+    # "Do you sell German coins?"
+    #
+    # We need stronger evidence than semantic similarity alone.
+    STRICT_MIN_LEXICAL_SCORE = 0.03
+
     STOP_WORDS = {
         "i",
         "me",
@@ -64,12 +65,17 @@ class RetrievalService:
         "please",
         "product",
         "products",
+        "coin",
+        "coins",
         "aed",
+        "have",
+        "sell",
+        "carry",
+        "available",
+        "stock",
     }
 
     def __init__(self) -> None:
-
-        # Validate vector files
 
         if not INDEX_FILE.exists():
             raise FileNotFoundError(
@@ -83,12 +89,9 @@ class RetrievalService:
                 "Run: python -m scripts.index_products"
             )
 
-        # Load FAISS
         self.index = faiss.read_index(
             str(INDEX_FILE)
         )
-
-        # Load metadata
 
         with open(
             METADATA_FILE,
@@ -97,18 +100,12 @@ class RetrievalService:
         ) as file:
             self.metadata = json.load(file)
 
-        # Full product lookup
-
         self.products_by_id = {
             str(product["product_id"]): product
             for product in product_service.products
         }
 
-        # Safety checks
-
-        if self.index.ntotal != len(
-            self.metadata
-        ):
+        if self.index.ntotal != len(self.metadata):
             raise RuntimeError(
                 "FAISS index and metadata are out of sync. "
                 "Run the indexing script again."
@@ -119,20 +116,18 @@ class RetrievalService:
         query: str,
         limit: int = 5,
         candidate_limit: int | None = None,
+        strict_match: bool = False,
     ) -> list[dict[str, Any]]:
 
         query = query.strip()
 
-        if not query:
-            return []
-
-        if limit <= 0:
+        if not query or limit <= 0:
             return []
 
         query_lower = query.lower()
 
         # =================================================
-        # 1. Extract structured / hard requirements
+        # 1. Hard filters
         # =================================================
 
         year = product_service._extract_year(
@@ -161,33 +156,18 @@ class RetrievalService:
         )
 
         # =================================================
-        # 2. Embed customer query
+        # 2. Query embedding
         # =================================================
 
         query_vector = (
             embedding_service.embed_text(
                 query
             )
+            .reshape(1, -1)
         )
 
-        query_vector = query_vector.reshape(
-            1,
-            -1,
-        )
-
-        # =================================================
-        # 3. Decide how many FAISS candidates to search
-        # =================================================
-        #
-        # With your current ~40 products, search everything.
-        #
-        # This prevents a valid hard-filter match from being
-        # lost before filtering.
-        #
-        # Later with thousands of products you can use an
-        # over-fetch value instead.
-        # =================================================
-
+        # Small catalog:
+        # search all products.
         if candidate_limit is None:
             search_limit = self.index.ntotal
         else:
@@ -200,7 +180,7 @@ class RetrievalService:
             return []
 
         # =================================================
-        # 4. Semantic FAISS search
+        # 3. FAISS semantic search
         # =================================================
 
         scores, indexes = self.index.search(
@@ -220,11 +200,8 @@ class RetrievalService:
             if index_position < 0:
                 continue
 
-            semantic_score = float(
-                score
-            )
+            semantic_score = float(score)
 
-            # Remove obviously weak matches.
             if (
                 semantic_score
                 < self.MIN_SEMANTIC_SCORE
@@ -255,7 +232,7 @@ class RetrievalService:
             })
 
         # =================================================
-        # 5. Apply HARD filters
+        # 4. Apply hard filters
         # =================================================
 
         filtered_candidates: list[
@@ -266,17 +243,12 @@ class RetrievalService:
 
             product = item["product"]
 
-            # -------------------------
             # Year
-            # -------------------------
-
             if year is not None:
 
                 try:
                     product_year = int(
-                        product.get(
-                            "year"
-                        )
+                        product.get("year")
                     )
                 except (
                     TypeError,
@@ -287,10 +259,7 @@ class RetrievalService:
                 if product_year != year:
                     continue
 
-            # -------------------------
             # Material
-            # -------------------------
-
             if material is not None:
 
                 product_material = str(
@@ -306,10 +275,7 @@ class RetrievalService:
                 ):
                     continue
 
-            # -------------------------
-            # Maximum price
-            # -------------------------
-
+            # Price
             if max_price is not None:
 
                 try:
@@ -328,10 +294,7 @@ class RetrievalService:
                 if price > max_price:
                     continue
 
-            # -------------------------
             # Stock
-            # -------------------------
-
             if wants_in_stock:
 
                 try:
@@ -355,7 +318,7 @@ class RetrievalService:
             )
 
         # =================================================
-        # 6. Extract useful query terms
+        # 5. Query keywords
         # =================================================
 
         query_words = (
@@ -365,28 +328,12 @@ class RetrievalService:
         )
 
         # =================================================
-        # 7. Hybrid ranking
+        # 6. Hybrid ranking
         # =================================================
-        #
-        # Semantic similarity remains the main score.
-        #
-        # Exact lexical matches provide smaller bonuses.
-        #
-        # This works generically for:
-        #
-        # UAE
-        # Abu Dhabi
-        # Dubai
-        # German
-        # Greek
-        # Roman
-        # Islamic
-        # heritage
-        # wildlife
-        # historic
-        # commemorative
-        # etc.
-        # =================================================
+
+        ranked_candidates: list[
+            dict[str, Any]
+        ] = []
 
         for item in filtered_candidates:
 
@@ -399,22 +346,38 @@ class RetrievalService:
                 )
             )
 
-            item[
-                "lexical_score"
-            ] = lexical_score
+            item["lexical_score"] = lexical_score
 
-            item[
-                "final_score"
-            ] = (
+            item["final_score"] = (
                 item["semantic_score"]
                 + lexical_score
             )
 
+            # IMPORTANT:
+            #
+            # Explicit catalog existence question:
+            #
+            # "Do you sell German coins?"
+            #
+            # If "German" does not match any catalog
+            # fields, do not return unrelated products.
+            if (
+                strict_match
+                and query_words
+                and lexical_score
+                < self.STRICT_MIN_LEXICAL_SCORE
+            ):
+                continue
+
+            ranked_candidates.append(
+                item
+            )
+
         # =================================================
-        # 8. Sort strongest matches first
+        # 7. Sort
         # =================================================
 
-        filtered_candidates.sort(
+        ranked_candidates.sort(
             key=lambda item: (
                 item["final_score"],
                 item["semantic_score"],
@@ -422,34 +385,25 @@ class RetrievalService:
             reverse=True,
         )
 
-        results = filtered_candidates[
+        results = ranked_candidates[
             :limit
         ]
 
         # =================================================
-        # 9. Development debug output
-        # =================================================
-        #
-        # Keep this while developing.
-        # Later replace/remove print() in production.
+        # 8. Development output
         # =================================================
 
         print("\n--- RAG RESULTS ---")
-
-        print(
-            f"Query: {query}"
-        )
-
+        print(f"Query: {query}")
+        print(f"Strict match: {strict_match}")
         print(
             f"Semantic candidates: "
             f"{len(candidates)}"
         )
-
         print(
-            f"After hard filters: "
-            f"{len(filtered_candidates)}"
+            f"After filters/ranking: "
+            f"{len(ranked_candidates)}"
         )
-
         print()
 
         for item in results:
@@ -463,23 +417,17 @@ class RetrievalService:
                 ),
                 "| semantic:",
                 round(
-                    item[
-                        "semantic_score"
-                    ],
+                    item["semantic_score"],
                     3,
                 ),
                 "| lexical:",
                 round(
-                    item[
-                        "lexical_score"
-                    ],
+                    item["lexical_score"],
                     3,
                 ),
                 "| final:",
                 round(
-                    item[
-                        "final_score"
-                    ],
+                    item["final_score"],
                     3,
                 ),
             )
@@ -487,18 +435,13 @@ class RetrievalService:
         print("-------------------\n")
 
         logger.info(
-            "RAG retrieval query=%r "
-            "semantic_candidates=%d "
-            "filtered=%d returned=%d",
+            "RAG query=%r strict=%s "
+            "candidates=%d returned=%d",
             query,
+            strict_match,
             len(candidates),
-            len(filtered_candidates),
             len(results),
         )
-
-        # =================================================
-        # 10. Return only actual product objects
-        # =================================================
 
         return [
             item["product"]
@@ -510,63 +453,33 @@ class RetrievalService:
         product: dict[str, Any],
         query_words: set[str],
     ) -> float:
-        """
-        Generic keyword relevance bonus.
-
-        It does NOT contain special rules for UAE,
-        Roman, Greek, Islamic, German, etc.
-
-        Exact matches in important product fields
-        receive additional ranking weight.
-        """
 
         name = str(
-            product.get(
-                "name",
-                "",
-            )
+            product.get("name", "")
         ).lower()
 
         category = str(
-            product.get(
-                "category",
-                "",
-            )
+            product.get("category", "")
         ).lower()
 
         country = str(
-            product.get(
-                "country",
-                "",
-            )
+            product.get("country", "")
         ).lower()
 
         region = str(
-            product.get(
-                "region",
-                "",
-            )
+            product.get("region", "")
         ).lower()
 
         theme = str(
-            product.get(
-                "theme",
-                "",
-            )
+            product.get("theme", "")
         ).lower()
 
         era = str(
-            product.get(
-                "era",
-                "",
-            )
+            product.get("era", "")
         ).lower()
 
         material = str(
-            product.get(
-                "material",
-                "",
-            )
+            product.get("material", "")
         ).lower()
 
         description = str(
@@ -580,18 +493,15 @@ class RetrievalService:
 
         for word in query_words:
 
-            # Product name is strongest.
             if word in name:
                 score += 0.08
 
-            # Country / region are strong signals.
             elif (
                 word in country
                 or word in region
             ):
                 score += 0.07
 
-            # Category/theme/era are also important.
             elif (
                 word in category
                 or word in theme
@@ -599,16 +509,12 @@ class RetrievalService:
             ):
                 score += 0.06
 
-            # Material.
             elif word in material:
                 score += 0.05
 
-            # Description is softer.
             elif word in description:
                 score += 0.03
 
-        # Prevent exact keywords from overpowering
-        # semantic meaning completely.
         return min(
             score,
             0.35,
@@ -618,9 +524,6 @@ class RetrievalService:
         self,
         query: str,
     ) -> set[str]:
-        """
-        Extract useful terms from customer query.
-        """
 
         words = re.findall(
             r"[a-z0-9]+",
