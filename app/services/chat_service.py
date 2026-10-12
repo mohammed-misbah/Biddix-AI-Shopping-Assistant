@@ -38,7 +38,7 @@ class ChatService:
             )
 
         # =================================================
-        # 2. Read conversation state
+        # 2. Current conversation state
         # =================================================
 
         previous_mode = (
@@ -55,22 +55,22 @@ class ChatService:
             )
         )
 
-        previous_product_ids = (
+        active_product_ids = (
             conversation_service
-            .get_last_product_ids(
+            .get_active_product_ids(
                 session_id
             )
         )
 
-        previous_catalog_query = (
+        active_catalog_query = (
             conversation_service
-            .get_last_catalog_query(
+            .get_active_catalog_query(
                 session_id
             )
         )
 
         # =================================================
-        # 3. Route current message
+        # 3. Understand message
         # =================================================
 
         route = query_router.route(
@@ -83,100 +83,160 @@ class ChatService:
             "session=%s "
             "mode=%s "
             "follow_up=%s "
-            "refresh_products=%s "
+            "refresh=%s "
             "style=%s "
-            "selection_limit=%s "
-            "strict=%s",
+            "selection_limit=%s",
             session_id,
             route.mode,
             route.is_follow_up,
             route.refresh_products,
             route.response_style,
             route.selection_limit,
-            route.strict_catalog_match,
         )
-
-        # =================================================
-        # 4. Resolve products
-        # =================================================
 
         products: list[
             dict[str, Any]
         ] = []
 
-        # -------------------------------------------------
-        # Knowledge:
-        # absolutely no cards
-        # -------------------------------------------------
+        effective_catalog_query: (
+            str | None
+        ) = None
+
+        # =================================================
+        # 4. Knowledge mode
+        # =================================================
 
         if route.mode == "knowledge":
 
             products = []
 
-        # -------------------------------------------------
-        # Catalog / mixed follow-up:
-        # reuse previous exact product set
-        # -------------------------------------------------
-
-        elif (
-            route.mode in (
-                "catalog",
-                "mixed",
-            )
-            and route.is_follow_up
-            and not route.refresh_products
-            and previous_product_ids
-        ):
-
-            products = (
-                retrieval_service
-                .get_products_by_ids(
-                    previous_product_ids
-                )
-            )
-
-            logger.info(
-                "Reusing previous product set: %s",
-                previous_product_ids,
-            )
-
-        # -------------------------------------------------
-        # Fresh search or changed requirements
-        # -------------------------------------------------
+        # =================================================
+        # 5. Catalog / mixed
+        # =================================================
 
         elif route.mode in (
             "catalog",
             "mixed",
         ):
 
-            retrieval_query = message
+            # ---------------------------------------------
+            # A. Product-selection follow-up
+            #
+            # "Which one?"
+            # "Choose two."
+            # "Compare those two."
+            #
+            # DO NOT RUN RAG AGAIN.
+            # ---------------------------------------------
 
-            products = (
-                retrieval_service.retrieve(
-                    query=retrieval_query,
-                    limit=5,
-                    strict_match=(
-                        route
-                        .strict_catalog_match
+            if (
+                route.is_follow_up
+                and not route.refresh_products
+                and active_product_ids
+            ):
+
+                products = (
+                    retrieval_service
+                    .get_products_by_ids(
+                        active_product_ids
+                    )
+                )
+
+                effective_catalog_query = (
+                    active_catalog_query
+                )
+
+                logger.info(
+                    "Reusing active products: %s",
+                    active_product_ids,
+                )
+
+            # ---------------------------------------------
+            # B. Search refinement
+            #
+            # Previous:
+            # UAE coins above 500
+            #
+            # New:
+            # Only silver ones
+            #
+            # Combined:
+            # UAE coins above 500. Only silver ones.
+            # ---------------------------------------------
+
+            elif (
+                route.is_follow_up
+                and route.refresh_products
+                and active_catalog_query
+            ):
+
+                effective_catalog_query = (
+                    f"{active_catalog_query}. "
+                    f"{message}"
+                )
+
+                products = (
+                    retrieval_service
+                    .retrieve(
+                        query=(
+                            effective_catalog_query
+                        ),
+                        limit=5,
+                        strict_match=(
+                            route
+                            .strict_catalog_match
+                        ),
+                    )
+                )
+
+                conversation_service.set_product_context(
+                    session_id=session_id,
+                    products=products,
+                    catalog_query=(
+                        effective_catalog_query
                     ),
                 )
-            )
 
-            # Save EXACT retrieved product set.
-            conversation_service.set_product_context(
-                session_id=session_id,
-                products=products,
-                catalog_query=(
-                    retrieval_query
-                ),
-            )
+                logger.info(
+                    "Refined catalog query: %s",
+                    effective_catalog_query,
+                )
 
-        # Final safety.
+            # ---------------------------------------------
+            # C. Fresh catalog search
+            # ---------------------------------------------
+
+            else:
+
+                effective_catalog_query = (
+                    message
+                )
+
+                products = (
+                    retrieval_service
+                    .retrieve(
+                        query=message,
+                        limit=5,
+                        strict_match=(
+                            route
+                            .strict_catalog_match
+                        ),
+                    )
+                )
+
+                conversation_service.set_product_context(
+                    session_id=session_id,
+                    products=products,
+                    catalog_query=message,
+                )
+
+        # Absolute safety.
         if route.mode == "knowledge":
+
             products = []
 
         # =================================================
-        # 5. Conversation history for Gemini
+        # 6. Conversation history
         # =================================================
 
         conversation_history = (
@@ -186,7 +246,7 @@ class ChatService:
         )
 
         # =================================================
-        # 6. Save current user message
+        # 7. Save user message
         # =================================================
 
         conversation_service.add_user_message(
@@ -196,7 +256,7 @@ class ChatService:
         )
 
         # =================================================
-        # 7. Gemini
+        # 8. Gemini
         # =================================================
 
         answer = (
@@ -215,7 +275,7 @@ class ChatService:
         )
 
         # =================================================
-        # 8. Remember answer
+        # 9. Save Gemini answer
         # =================================================
 
         conversation_service.add_assistant_message(
@@ -224,7 +284,7 @@ class ChatService:
         )
 
         # =================================================
-        # 9. Knowledge mode never renders products
+        # 10. Knowledge has no cards
         # =================================================
 
         if route.mode == "knowledge":
@@ -234,14 +294,7 @@ class ChatService:
         else:
 
             # ---------------------------------------------
-            # Put products mentioned by Gemini first.
-            #
-            # Example:
-            #
-            # Gemini:
-            # "I'd choose the Emirates Map Silver Coin."
-            #
-            # Emirates Map card becomes card #1.
+            # Put products Gemini actually mentioned first.
             # ---------------------------------------------
 
             ordered_products = (
@@ -252,13 +305,13 @@ class ChatService:
             )
 
             # ---------------------------------------------
-            # If customer explicitly asked:
+            # Selection follow-up.
             #
-            # "Which one?"
-            # → show 1 card
+            # Example:
+            # "Choose two"
             #
-            # "Choose one or two"
-            # → show max 2 cards
+            # After this turn, those two become
+            # the new active product set.
             # ---------------------------------------------
 
             if (
@@ -266,10 +319,39 @@ class ChatService:
                 is not None
             ):
 
-                ordered_products = (
+                selected_products = (
                     ordered_products[
                         :route.selection_limit
                     ]
+                )
+
+                # CRITICAL FIX:
+                #
+                # Old active set:
+                # A B C D E
+                #
+                # "Choose two"
+                #
+                # New active set:
+                # A C
+                conversation_service.set_active_products(
+                    session_id=session_id,
+                    products=selected_products,
+                )
+
+                ordered_products = (
+                    selected_products
+                )
+
+                logger.info(
+                    "Narrowed active products to: %s",
+                    [
+                        product.get(
+                            "product_id"
+                        )
+                        for product
+                        in selected_products
+                    ],
                 )
 
             response_products = [
@@ -281,19 +363,17 @@ class ChatService:
             ]
 
         # =================================================
-        # 10. API response
+        # 11. Response
         # =================================================
 
         return {
             "answer": answer,
-            "session_id":
-                session_id,
-            "products":
-                response_products,
+            "session_id": session_id,
+            "products": response_products,
         }
 
     # =====================================================
-    # Format history
+    # Format conversation
     # =====================================================
 
     @staticmethod
@@ -333,7 +413,9 @@ class ChatService:
             dict[str, Any]
         ],
         answer: str,
-    ) -> list[dict[str, Any]]:
+    ) -> list[
+        dict[str, Any]
+    ]:
 
         answer_lower = (
             answer.lower()
@@ -341,7 +423,10 @@ class ChatService:
 
         ranked = []
 
-        for original_position, product in enumerate(
+        for (
+            original_position,
+            product,
+        ) in enumerate(
             products
         ):
 
@@ -366,7 +451,7 @@ class ChatService:
 
             if answer_position >= 0:
 
-                sort_key = (
+                key = (
                     0,
                     answer_position,
                     original_position,
@@ -374,7 +459,7 @@ class ChatService:
 
             else:
 
-                sort_key = (
+                key = (
                     1,
                     original_position,
                     original_position,
@@ -382,7 +467,7 @@ class ChatService:
 
             ranked.append(
                 (
-                    sort_key,
+                    key,
                     product,
                 )
             )
@@ -399,7 +484,7 @@ class ChatService:
         ]
 
     # =====================================================
-    # Product card data
+    # Product response card
     # =====================================================
 
     @staticmethod

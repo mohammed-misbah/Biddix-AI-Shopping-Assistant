@@ -127,9 +127,9 @@ class LLMService:
 
                 return self._fallback()
 
-            candidate = (
-                candidates[0]
-            )
+            candidate = candidates[
+                0
+            ]
 
             finish_reason = (
                 candidate.get(
@@ -174,7 +174,7 @@ class LLMService:
             if not answer:
 
                 logger.error(
-                    "Gemini returned an empty answer."
+                    "Gemini returned empty answer."
                 )
 
                 return self._fallback()
@@ -214,7 +214,9 @@ class LLMService:
         products: list[
             dict[str, Any]
         ],
-    ) -> list[dict[str, Any]]:
+    ) -> list[
+        dict[str, Any]
+    ]:
 
         safe_products = []
 
@@ -263,8 +265,8 @@ class LLMService:
 
             else:
 
-                # Do not let the language model treat
-                # an unverified JSON stock number as live inventory.
+                # Raw JSON stock is not trusted
+                # as live production inventory.
                 safe_product.pop(
                     "stock",
                     None,

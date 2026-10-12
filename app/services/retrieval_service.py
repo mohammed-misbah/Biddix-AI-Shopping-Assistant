@@ -69,6 +69,8 @@ class RetrievalService:
         "carry",
         "available",
         "stock",
+        "only",
+        "ones",
     }
 
     def __init__(self) -> None:
@@ -76,16 +78,14 @@ class RetrievalService:
         if not INDEX_FILE.exists():
 
             raise FileNotFoundError(
-                f"FAISS index not found: "
-                f"{INDEX_FILE}. "
+                f"FAISS index not found: {INDEX_FILE}. "
                 "Run: python -m scripts.index_products"
             )
 
         if not METADATA_FILE.exists():
 
             raise FileNotFoundError(
-                f"Metadata file not found: "
-                f"{METADATA_FILE}. "
+                f"Metadata file not found: {METADATA_FILE}. "
                 "Run: python -m scripts.index_products"
             )
 
@@ -99,13 +99,15 @@ class RetrievalService:
             encoding="utf-8",
         ) as file:
 
-            self.metadata = (
-                json.load(file)
+            self.metadata = json.load(
+                file
             )
 
         self.products_by_id = {
             str(
-                product["product_id"]
+                product[
+                    "product_id"
+                ]
             ): product
             for product
             in product_service.products
@@ -121,9 +123,9 @@ class RetrievalService:
                 "are out of sync."
             )
 
-    # =================================================
-    # Restore exact previous product set
-    # =================================================
+    # =====================================================
+    # Restore saved conversation products
+    # =====================================================
 
     def get_products_by_ids(
         self,
@@ -141,15 +143,16 @@ class RetrievalService:
             )
 
             if product is not None:
+
                 products.append(
                     product
                 )
 
         return products
 
-    # =================================================
+    # =====================================================
     # Main retrieval
-    # =================================================
+    # =====================================================
 
     def retrieve(
         self,
@@ -167,7 +170,7 @@ class RetrievalService:
         query_lower = query.lower()
 
         # -------------------------------------------------
-        # Structured filters
+        # Hard filters
         # -------------------------------------------------
 
         year = (
@@ -304,7 +307,7 @@ class RetrievalService:
             })
 
         # -------------------------------------------------
-        # Hard filters
+        # Apply structured filters
         # -------------------------------------------------
 
         filtered = []
@@ -315,7 +318,7 @@ class RetrievalService:
                 "product"
             ]
 
-            # Year
+            # YEAR
             if year is not None:
 
                 try:
@@ -335,7 +338,7 @@ class RetrievalService:
                 if product_year != year:
                     continue
 
-            # Material
+            # MATERIAL
             if material is not None:
 
                 product_material = str(
@@ -351,7 +354,7 @@ class RetrievalService:
                 ):
                     continue
 
-            # Price
+            # PRICE
             try:
 
                 price = float(
@@ -379,21 +382,20 @@ class RetrievalService:
             ):
                 continue
 
-            # -------------------------------------------------
-            # Availability
+            # STOCK
             #
-            # Numeric stock alone is not treated as confirmed
-            # availability unless availability_confirmed=True.
-            # -------------------------------------------------
-
+            # Only enforce live-stock filtering
+            # when the backend explicitly confirms it.
             if wants_in_stock:
 
-                if (
+                availability_confirmed = (
                     product.get(
                         "availability_confirmed"
                     )
-                    is not True
-                ):
+                    is True
+                )
+
+                if not availability_confirmed:
                     continue
 
                 try:
@@ -502,6 +504,22 @@ class RetrievalService:
         )
 
         print(
+            f"Year: {year}"
+        )
+
+        print(
+            f"Min price: {min_price}"
+        )
+
+        print(
+            f"Max price: {max_price}"
+        )
+
+        print(
+            f"Material: {material}"
+        )
+
+        print(
             f"Candidates: "
             f"{len(candidates)}"
         )
@@ -510,6 +528,8 @@ class RetrievalService:
             f"After filters: "
             f"{len(ranked)}"
         )
+
+        print()
 
         for item in results:
 
@@ -548,10 +568,8 @@ class RetrievalService:
         )
 
         logger.info(
-            "RAG query=%r "
-            "strict=%s "
-            "candidates=%d "
-            "returned=%d",
+            "RAG query=%r strict=%s "
+            "candidates=%d returned=%d",
             query,
             strict_match,
             len(candidates),
@@ -565,9 +583,9 @@ class RetrievalService:
             for item in results
         ]
 
-    # =================================================
-    # Lexical scoring
-    # =================================================
+    # =====================================================
+    # Lexical score
+    # =====================================================
 
     def _calculate_lexical_score(
         self,

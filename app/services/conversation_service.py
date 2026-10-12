@@ -18,6 +18,7 @@ class ConversationTurn:
         "user",
         "assistant",
     ]
+
     content: str
 
 
@@ -32,13 +33,29 @@ class ConversationSession:
 
     last_mode: QueryMode | None = None
 
-    # Product set currently being discussed.
-    last_product_ids: list[str] = field(
+    # Products currently being discussed.
+    #
+    # Example:
+    # User searches 5 products.
+    # Then chooses 2.
+    #
+    # This becomes those 2.
+    active_product_ids: list[str] = field(
         default_factory=list
     )
 
-    # Last real catalog search.
-    last_catalog_query: str | None = None
+    # The last actual catalog search query.
+    #
+    # Example:
+    # "UAE coins above 500 AED"
+    #
+    # This lets:
+    # "Only silver ones"
+    #
+    # become:
+    #
+    # "UAE coins above 500 AED. Only silver ones."
+    active_catalog_query: str | None = None
 
     updated_at: datetime = field(
         default_factory=lambda: (
@@ -69,9 +86,7 @@ class ConversationService:
 
         if session is None:
 
-            session = (
-                ConversationSession()
-            )
+            session = ConversationSession()
 
             self.sessions[
                 session_id
@@ -101,56 +116,40 @@ class ConversationService:
             session_id
         ).last_mode
 
-    def get_last_user_message(
+    def get_active_product_ids(
         self,
         session_id: str,
-    ) -> str | None:
+    ) -> list[str]:
 
         session = self.get_session(
             session_id
         )
 
-        for turn in reversed(
-            session.turns
-        ):
-
-            if turn.role == "user":
-                return turn.content
-
-        return None
-
-    def get_last_product_ids(
-        self,
-        session_id: str,
-    ) -> list[str]:
-
         return list(
-            self.get_session(
-                session_id
-            ).last_product_ids
+            session.active_product_ids
         )
 
-    def get_last_catalog_query(
+    def get_active_catalog_query(
         self,
         session_id: str,
     ) -> str | None:
 
         return self.get_session(
             session_id
-        ).last_catalog_query
+        ).active_catalog_query
 
     def set_product_context(
         self,
         session_id: str,
         products: list[dict],
-        catalog_query: str,
+        catalog_query: str | None = None,
     ) -> None:
 
         session = self.get_session(
             session_id
         )
 
-        session.last_product_ids = [
+        session.active_product_ids = [
             str(
                 product.get(
                     "product_id"
@@ -162,9 +161,73 @@ class ConversationService:
             )
         ]
 
-        session.last_catalog_query = (
-            catalog_query
+        if catalog_query is not None:
+            session.active_catalog_query = (
+                catalog_query
+            )
+
+        session.updated_at = (
+            datetime.now(
+                timezone.utc
+            )
         )
+
+    def set_active_products(
+        self,
+        session_id: str,
+        products: list[dict],
+    ) -> None:
+
+        """
+        Narrow the current product conversation.
+
+        Example:
+
+        Previous products:
+        A, B, C, D, E
+
+        Customer:
+        "Choose two."
+
+        Gemini chooses:
+        A, C
+
+        Active product context becomes:
+        A, C
+        """
+
+        session = self.get_session(
+            session_id
+        )
+
+        session.active_product_ids = [
+            str(
+                product.get(
+                    "product_id"
+                )
+            )
+            for product in products
+            if product.get(
+                "product_id"
+            )
+        ]
+
+        session.updated_at = (
+            datetime.now(
+                timezone.utc
+            )
+        )
+
+    def clear_product_context(
+        self,
+        session_id: str,
+    ) -> None:
+
+        session = self.get_session(
+            session_id
+        )
+
+        session.active_product_ids = []
 
         session.updated_at = (
             datetime.now(

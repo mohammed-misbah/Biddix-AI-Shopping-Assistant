@@ -20,18 +20,26 @@ ResponseStyle = Literal[
 @dataclass(frozen=True)
 class QueryRoute:
     mode: QueryMode
+
     strict_catalog_match: bool = False
+
+    # Is this message continuing the previous turn?
     is_follow_up: bool = False
+
+    # Does the user add/change search requirements?
+    # Example:
+    # "Only silver ones."
     refresh_products: bool = False
+
     response_style: ResponseStyle = "normal"
+
+    # Example:
+    # "Which one?" -> 1
+    # "Choose two" -> 2
     selection_limit: int | None = None
 
 
 class QueryRouter:
-
-    # -------------------------------------------------
-    # General knowledge / educational questions
-    # -------------------------------------------------
 
     KNOWLEDGE_PATTERNS = (
         r"\blearn\b",
@@ -60,10 +68,6 @@ class QueryRouter:
         r"\bhow were\b",
         r"\bhow was\b",
     )
-
-    # -------------------------------------------------
-    # Shopping / product catalog
-    # -------------------------------------------------
 
     CATALOG_PATTERNS = (
         r"\bdo you have\b",
@@ -99,10 +103,6 @@ class QueryRouter:
         r"\bexplore\b",
     )
 
-    # -------------------------------------------------
-    # Explicit catalog existence / inventory questions
-    # -------------------------------------------------
-
     STRICT_CATALOG_PATTERNS = (
         r"\bdo you have\b",
         r"\bdo you sell\b",
@@ -112,10 +112,6 @@ class QueryRouter:
         r"\bstock\b",
         r"\bcarry\b",
     )
-
-    # -------------------------------------------------
-    # Conversation follow-ups
-    # -------------------------------------------------
 
     FOLLOW_UP_PATTERNS = (
         r"^\s*make (it )?(even )?(more )?short(er)?",
@@ -131,24 +127,36 @@ class QueryRouter:
         r"^\s*how\s*\??\s*$",
         r"^\s*what about",
         r"^\s*which one",
-        r"^\s*which is better",
+        r"^\s*which is",
         r"^\s*choose one",
         r"^\s*choose two",
         r"^\s*choose one or two",
         r"^\s*choose .* from .* listed",
         r"^\s*compare them",
         r"^\s*compare these",
+        r"^\s*compare only",
         r"^\s*the first one",
         r"^\s*the second one",
         r"^\s*the third one",
         r"^\s*this one",
         r"^\s*that one",
+        r"^\s*tell me more about that",
+        r"^\s*tell me more about this",
     )
 
-    # -------------------------------------------------
-    # New constraints mean retrieval should run again
-    # -------------------------------------------------
-
+    # If one of these appears in a follow-up,
+    # we must run retrieval again.
+    #
+    # Example:
+    #
+    # Previous:
+    # "UAE coins above 500"
+    #
+    # New:
+    # "Only silver ones"
+    #
+    # We need a NEW search while keeping the
+    # previous search requirements.
     SEARCH_REFRESH_PATTERNS = (
         r"\b(19|20)\d{2}\b",
         r"\bunder\s+\d+",
@@ -168,6 +176,7 @@ class QueryRouter:
         r"\bplatinum\b",
         r"\bin stock\b",
         r"\bavailable\b",
+        r"\bonly\b",
     )
 
     VERY_BRIEF_PATTERNS = (
@@ -190,6 +199,7 @@ class QueryRouter:
         r"\bsummarize\b",
         r"\bsummary\b",
         r"\bconcise\b",
+        r"\bshort paragraph\b",
     )
 
     DETAILED_PATTERNS = (
@@ -225,7 +235,7 @@ class QueryRouter:
         )
 
         # -------------------------------------------------
-        # Follow-up to an existing conversation
+        # Clear conversational follow-up
         # -------------------------------------------------
 
         if (
@@ -254,10 +264,6 @@ class QueryRouter:
                 selection_limit=selection_limit,
             )
 
-        # -------------------------------------------------
-        # Fresh intent detection
-        # -------------------------------------------------
-
         knowledge = self._matches_any(
             text,
             self.KNOWLEDGE_PATTERNS,
@@ -273,6 +279,10 @@ class QueryRouter:
             self.STRICT_CATALOG_PATTERNS,
         )
 
+        # -------------------------------------------------
+        # New mixed question
+        # -------------------------------------------------
+
         if knowledge and catalog:
             return QueryRoute(
                 mode="mixed",
@@ -281,11 +291,19 @@ class QueryRouter:
                 selection_limit=selection_limit,
             )
 
+        # -------------------------------------------------
+        # New knowledge question
+        # -------------------------------------------------
+
         if knowledge:
             return QueryRoute(
                 mode="knowledge",
                 response_style=response_style,
             )
+
+        # -------------------------------------------------
+        # New catalog question
+        # -------------------------------------------------
 
         if catalog:
             return QueryRoute(
@@ -296,13 +314,32 @@ class QueryRouter:
             )
 
         # -------------------------------------------------
-        # Ambiguous short message in an existing session
+        # Ambiguous message but we already have context
+        #
+        # Example:
+        # "Only silver ones."
+        #
+        # No normal catalog phrase is present,
+        # but it is clearly modifying the previous query.
         # -------------------------------------------------
 
         if previous_mode is not None:
+
+            refresh_products = (
+                previous_mode in (
+                    "catalog",
+                    "mixed",
+                )
+                and self._matches_any(
+                    text,
+                    self.SEARCH_REFRESH_PATTERNS,
+                )
+            )
+
             return QueryRoute(
                 mode=previous_mode,
                 is_follow_up=True,
+                refresh_products=refresh_products,
                 response_style=response_style,
                 selection_limit=selection_limit,
             )
@@ -342,6 +379,7 @@ class QueryRouter:
         text: str,
     ) -> int | None:
 
+        # One explicit choice
         if re.search(
             r"\bwhich one\b",
             text,
@@ -350,21 +388,28 @@ class QueryRouter:
             return 1
 
         if re.search(
-            r"\bchoose one\b",
+            r"\bwhich is the cheapest\b",
             text,
             re.IGNORECASE,
         ):
-            if re.search(
-                r"\bone or two\b",
-                text,
-                re.IGNORECASE,
-            ):
-                return 2
-
             return 1
 
         if re.search(
-            r"\bchoose two\b",
+            r"\bwhich is cheapest\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return 1
+
+        if re.search(
+            r"\btell me more about (that|this) coin\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return 1
+
+        if re.search(
+            r"\bchoose one or two\b",
             text,
             re.IGNORECASE,
         ):
@@ -376,6 +421,27 @@ class QueryRouter:
             re.IGNORECASE,
         ):
             return 2
+
+        if re.search(
+            r"\bchoose two\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return 2
+
+        if re.search(
+            r"\bthose two\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return 2
+
+        if re.search(
+            r"\bchoose one\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return 1
 
         return None
 
