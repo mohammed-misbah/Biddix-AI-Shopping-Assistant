@@ -18,13 +18,24 @@ ResponseStyle = Literal[
 
 FollowUpType = Literal[
     "none",
-    "reuse_products",
     "refine_search",
+    "reuse_results",
+    "reuse_selection",
+    "reuse_focus",
+]
+
+ProductAction = Literal[
+    "none",
+    "choose",
+    "cheapest",
+    "compare",
+    "detail",
 ]
 
 
 @dataclass(frozen=True)
 class QueryRoute:
+
     mode: QueryMode
 
     strict_catalog_match: bool = False
@@ -33,12 +44,18 @@ class QueryRoute:
 
     follow_up_type: FollowUpType = "none"
 
+    product_action: ProductAction = "none"
+
     response_style: ResponseStyle = "normal"
 
     selection_limit: int | None = None
 
 
 class QueryRouter:
+
+    # =================================================
+    # KNOWLEDGE
+    # =================================================
 
     KNOWLEDGE_PATTERNS = (
         r"\blearn\b",
@@ -53,16 +70,16 @@ class QueryRouter:
         r"\borigin\b",
         r"\borigins\b",
         r"\bmeaning\b",
-        r"\bfamous\b",
         r"\bspecial\b",
-        r"\bspeciality\b",
         r"\bspecialty\b",
-        r"\binformation about\b",
-        r"\bdetails about\b",
-        r"\bdetail about\b",
+        r"\bspeciality\b",
+        r"\bfamous\b",
         r"\boverview\b",
-        r"\bsummarize\b",
     )
+
+    # =================================================
+    # CATALOG
+    # =================================================
 
     CATALOG_PATTERNS = (
         r"\bdo you have\b",
@@ -83,7 +100,6 @@ class QueryRouter:
         r"\bi want\b",
         r"\bbudget\b",
         r"\bgift\b",
-        r"\bcollection\b",
         r"\bexplore\b",
     )
 
@@ -96,33 +112,9 @@ class QueryRouter:
         r"\bstock\b",
     )
 
-    PRODUCT_REFERENCE_PATTERNS = (
-        r"\bwhich one\b",
-        r"\bwhich ones\b",
-        r"\bwhich is cheaper\b",
-        r"\bwhich is cheapest\b",
-        r"\bwhich is the cheapest\b",
-        r"\bwhich is better\b",
-        r"\bchoose one\b",
-        r"\bchoose two\b",
-        r"\bchoose one or two\b",
-        r"\bpick one\b",
-        r"\bpick two\b",
-        r"\bcompare them\b",
-        r"\bcompare these\b",
-        r"\bcompare those\b",
-        r"\bthose two\b",
-        r"\bthese two\b",
-        r"\bthat coin\b",
-        r"\bthis coin\b",
-        r"\bthat one\b",
-        r"\bthis one\b",
-        r"\bfirst one\b",
-        r"\bsecond one\b",
-        r"\bthird one\b",
-        r"\btell me more about that\b",
-        r"\btell me more about this\b",
-    )
+    # =================================================
+    # REFINEMENTS
+    # =================================================
 
     REFINEMENT_PATTERNS = (
         r"\bonly\b",
@@ -143,6 +135,10 @@ class QueryRouter:
         r"\bin stock\b",
         r"\bavailable\b",
     )
+
+    # =================================================
+    # STYLES
+    # =================================================
 
     VERY_BRIEF_PATTERNS = (
         r"\beven shorter\b",
@@ -181,53 +177,174 @@ class QueryRouter:
 
         text = message.strip().lower()
 
+        style = self._detect_response_style(
+            text
+        )
+
         if not text:
+
             return QueryRoute(
-                mode=previous_mode or "catalog"
+                mode=previous_mode or "catalog",
+                response_style=style,
             )
 
-        response_style = (
-            self._detect_response_style(text)
-        )
-
-        selection_limit = (
-            self._detect_selection_limit(text)
-        )
-
-        # -----------------------------------------
-        # Product-reference follow-up
-        # -----------------------------------------
+        # =================================================
+        # 1. DETAIL ABOUT CURRENT FOCUSED PRODUCT
+        # =================================================
 
         if (
-            previous_mode in ("catalog", "mixed")
-            and self._matches_any(
+            previous_mode in (
+                "catalog",
+                "mixed",
+            )
+            and re.search(
+                r"\b(tell me more|more details?|more information)"
+                r"\s+(about\s+)?(that|this)"
+                r"\s+(coin|one|product)?\b",
                 text,
-                self.PRODUCT_REFERENCE_PATTERNS,
             )
         ):
+
             return QueryRoute(
                 mode=previous_mode,
                 is_follow_up=True,
-                follow_up_type="reuse_products",
-                response_style=response_style,
-                selection_limit=selection_limit,
+                follow_up_type="reuse_focus",
+                product_action="detail",
+                response_style=style,
+                selection_limit=1,
             )
 
-        # -----------------------------------------
-        # Search refinement
-        # -----------------------------------------
+        # =================================================
+        # 2. COMPARE PREVIOUS SELECTION
+        # =================================================
 
         if (
-            previous_mode in ("catalog", "mixed")
-            and self._looks_like_refinement(text)
+            previous_mode in (
+                "catalog",
+                "mixed",
+            )
+            and re.search(
+                r"\bcompare\b",
+                text,
+            )
         ):
+
+            return QueryRoute(
+                mode=previous_mode,
+                is_follow_up=True,
+                follow_up_type="reuse_selection",
+                product_action="compare",
+                response_style=style,
+            )
+
+        # =================================================
+        # 3. CHEAPEST / BEST FROM LAST RESULT SET
+        # =================================================
+
+        if (
+            previous_mode in (
+                "catalog",
+                "mixed",
+            )
+            and re.search(
+                r"\bcheapest\b",
+                text,
+            )
+        ):
+
+            return QueryRoute(
+                mode=previous_mode,
+                is_follow_up=True,
+                follow_up_type="reuse_results",
+                product_action="cheapest",
+                response_style=style,
+                selection_limit=1,
+            )
+
+        # =================================================
+        # 4. CHOOSE TWO
+        # =================================================
+
+        if (
+            previous_mode in (
+                "catalog",
+                "mixed",
+            )
+            and re.search(
+                r"\b("
+                r"choose two"
+                r"|pick two"
+                r"|choose one or two"
+                r"|one or two"
+                r")\b",
+                text,
+            )
+        ):
+
+            return QueryRoute(
+                mode=previous_mode,
+                is_follow_up=True,
+                follow_up_type="reuse_results",
+                product_action="choose",
+                response_style=style,
+                selection_limit=2,
+            )
+
+        # =================================================
+        # 5. CHOOSE ONE
+        # =================================================
+
+        if (
+            previous_mode in (
+                "catalog",
+                "mixed",
+            )
+            and re.search(
+                r"\b("
+                r"which one"
+                r"|choose one"
+                r"|pick one"
+                r"|which is better"
+                r"|which would you choose"
+                r")\b",
+                text,
+            )
+        ):
+
+            return QueryRoute(
+                mode=previous_mode,
+                is_follow_up=True,
+                follow_up_type="reuse_results",
+                product_action="choose",
+                response_style=style,
+                selection_limit=1,
+            )
+
+        # =================================================
+        # 6. SEARCH REFINEMENT
+        # =================================================
+
+        if (
+            previous_mode in (
+                "catalog",
+                "mixed",
+            )
+            and self._matches_any(
+                text,
+                self.REFINEMENT_PATTERNS,
+            )
+        ):
+
             return QueryRoute(
                 mode=previous_mode,
                 is_follow_up=True,
                 follow_up_type="refine_search",
-                response_style=response_style,
-                selection_limit=selection_limit,
+                response_style=style,
             )
+
+        # =================================================
+        # 7. NEW INTENT CLASSIFICATION
+        # =================================================
 
         knowledge = self._matches_any(
             text,
@@ -245,28 +362,35 @@ class QueryRouter:
         )
 
         if knowledge and catalog:
+
             return QueryRoute(
                 mode="mixed",
-                strict_catalog_match=strict_catalog,
-                response_style=response_style,
+                strict_catalog_match=(
+                    strict_catalog
+                ),
+                response_style=style,
             )
 
         if knowledge:
+
             return QueryRoute(
                 mode="knowledge",
-                response_style=response_style,
+                response_style=style,
             )
 
         if catalog:
+
             return QueryRoute(
                 mode="catalog",
-                strict_catalog_match=strict_catalog,
-                response_style=response_style,
+                strict_catalog_match=(
+                    strict_catalog
+                ),
+                response_style=style,
             )
 
-        # -----------------------------------------
-        # Normal conversation continuation
-        # -----------------------------------------
+        # =================================================
+        # 8. GENERIC CONTINUATION
+        # =================================================
 
         if previous_mode is not None:
 
@@ -274,44 +398,22 @@ class QueryRouter:
                 mode=previous_mode,
                 is_follow_up=True,
                 follow_up_type=(
-                    "reuse_products"
+                    "reuse_selection"
                     if previous_mode
                     in ("catalog", "mixed")
                     else "none"
                 ),
-                response_style=response_style,
-                selection_limit=selection_limit,
+                response_style=style,
             )
 
         return QueryRoute(
             mode="catalog",
-            response_style=response_style,
+            response_style=style,
         )
 
-    def _looks_like_refinement(
-        self,
-        text: str,
-    ) -> bool:
-
-        if self._matches_any(
-            text,
-            self.REFINEMENT_PATTERNS,
-        ):
-            return True
-
-        # Short fragments such as:
-        #
-        # "silver ones"
-        # "gold only"
-        # "2024"
-        #
-        # are commonly refinements.
-        words = text.split()
-
-        if len(words) <= 5:
-            return True
-
-        return False
+    # =================================================
+    # STYLE
+    # =================================================
 
     def _detect_response_style(
         self,
@@ -338,36 +440,9 @@ class QueryRouter:
 
         return "normal"
 
-    @staticmethod
-    def _detect_selection_limit(
-        text: str,
-    ) -> int | None:
-
-        if re.search(
-            r"\b(which one|pick one|choose one)\b",
-            text,
-        ):
-            return 1
-
-        if re.search(
-            r"\bcheapest\b",
-            text,
-        ):
-            return 1
-
-        if re.search(
-            r"\btell me more about (that|this)\b",
-            text,
-        ):
-            return 1
-
-        if re.search(
-            r"\b(one or two|choose two|pick two|those two|these two)\b",
-            text,
-        ):
-            return 2
-
-        return None
+    # =================================================
+    # HELPERS
+    # =================================================
 
     @staticmethod
     def _matches_any(

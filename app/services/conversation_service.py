@@ -14,6 +14,17 @@ QueryMode = Literal[
 
 @dataclass
 class CatalogFilters:
+    """
+    Persistent structured shopping filters.
+
+    These survive follow-up messages such as:
+
+    "Show me coins above 500 AED."
+    "Only silver ones."
+
+    The second message changes material,
+    but keeps min_price=500.
+    """
 
     year: int | None = None
 
@@ -27,29 +38,23 @@ class CatalogFilters:
 
     in_stock: bool = False
 
-    # Generic catalog facets.
+    # Generic future catalog facets:
     #
-    # Possible examples:
     # country
     # region
-    # category
     # theme
     # era
-    # period
+    # category
     # denomination
     #
-    # Nothing is country-specific.
-    facets: dict[
-        str,
-        set[str],
-    ] = field(
+    # No specific country is hard-coded here.
+    facets: dict[str, set[str]] = field(
         default_factory=dict
     )
 
 
 @dataclass
 class ConversationTurn:
-
     role: Literal[
         "user",
         "assistant",
@@ -61,52 +66,82 @@ class ConversationTurn:
 @dataclass
 class ConversationSession:
 
-    turns: list[
-        ConversationTurn
-    ] = field(
+    turns: list[ConversationTurn] = field(
         default_factory=list
     )
 
     last_mode: QueryMode | None = None
 
-    # Products that the customer is
-    # currently talking about.
-    active_product_ids: list[str] = field(
+    # -------------------------------------------------
+    # IMPORTANT PRODUCT MEMORY
+    # -------------------------------------------------
+
+    # Last FULL result set returned by retrieval.
+    #
+    # Example:
+    #
+    # Sheikh Zayed
+    # Expo Dubai
+    # Arabian Leopard
+    #
+    # This is preserved even if later the customer
+    # focuses on Arabian Leopard.
+    last_result_product_ids: list[str] = field(
         default_factory=list
     )
 
-    # Search constraints persist across
-    # refinement turns.
+    # Products intentionally selected from the
+    # last result set.
+    #
+    # Example:
+    #
+    # "Choose two"
+    #
+    # -> [Heritage, Emirates Map]
+    selected_product_ids: list[str] = field(
+        default_factory=list
+    )
+
+    # One currently focused product.
+    #
+    # Example:
+    #
+    # "Which is cheapest?"
+    # -> Arabian Leopard
+    #
+    # "Tell me more about that coin"
+    # -> use this product.
+    focused_product_id: str | None = None
+
+    # -------------------------------------------------
+    # SEARCH STATE
+    # -------------------------------------------------
+
     active_filters: CatalogFilters = field(
         default_factory=CatalogFilters
     )
 
-    # Semantic meaning of the current search.
-    #
-    # Example:
-    # "meaningful historical collector coin"
-    #
-    # Geography/themes remain semantic unless
-    # the catalog supplies structured facets.
     semantic_query: str = ""
 
     updated_at: datetime = field(
-        default_factory=lambda: (
-            datetime.now(
-                timezone.utc
-            )
+        default_factory=lambda: datetime.now(
+            timezone.utc
         )
     )
 
 
 class ConversationService:
 
-    def __init__(self):
+    def __init__(self) -> None:
 
         self.sessions: dict[
             str,
             ConversationSession,
         ] = {}
+
+    # =================================================
+    # SESSION
+    # =================================================
 
     def get_session(
         self,
@@ -126,6 +161,10 @@ class ConversationService:
             ] = session
 
         return session
+
+    # =================================================
+    # HISTORY
+    # =================================================
 
     def get_history(
         self,
@@ -149,7 +188,11 @@ class ConversationService:
             session_id
         ).last_mode
 
-    def get_active_product_ids(
+    # =================================================
+    # PRODUCT STATE
+    # =================================================
+
+    def get_last_result_product_ids(
         self,
         session_id: str,
     ) -> list[str]:
@@ -157,8 +200,153 @@ class ConversationService:
         return list(
             self.get_session(
                 session_id
-            ).active_product_ids
+            ).last_result_product_ids
         )
+
+    def get_selected_product_ids(
+        self,
+        session_id: str,
+    ) -> list[str]:
+
+        return list(
+            self.get_session(
+                session_id
+            ).selected_product_ids
+        )
+
+    def get_focused_product_id(
+        self,
+        session_id: str,
+    ) -> str | None:
+
+        return self.get_session(
+            session_id
+        ).focused_product_id
+
+    def set_last_results(
+        self,
+        session_id: str,
+        products: list[dict],
+    ) -> None:
+        """
+        Save a new FULL search result set.
+
+        A fresh/refined search resets any old
+        selection/focused-product state.
+        """
+
+        session = self.get_session(
+            session_id
+        )
+
+        session.last_result_product_ids = [
+            str(
+                product["product_id"]
+            )
+            for product in products
+            if product.get(
+                "product_id"
+            )
+        ]
+
+        # New search = old selection is no longer active.
+        session.selected_product_ids = []
+        session.focused_product_id = None
+
+        self._touch(
+            session
+        )
+
+    def set_selected_products(
+        self,
+        session_id: str,
+        products: list[dict],
+    ) -> None:
+
+        session = self.get_session(
+            session_id
+        )
+
+        session.selected_product_ids = [
+            str(
+                product["product_id"]
+            )
+            for product in products
+            if product.get(
+                "product_id"
+            )
+        ]
+
+        # If exactly one product is selected,
+        # it naturally becomes focused.
+        if len(
+            session.selected_product_ids
+        ) == 1:
+
+            session.focused_product_id = (
+                session.selected_product_ids[0]
+            )
+
+        self._touch(
+            session
+        )
+
+    def set_focused_product(
+        self,
+        session_id: str,
+        product: dict | None,
+    ) -> None:
+
+        session = self.get_session(
+            session_id
+        )
+
+        if (
+            product is not None
+            and product.get(
+                "product_id"
+            )
+        ):
+
+            product_id = str(
+                product["product_id"]
+            )
+
+            session.focused_product_id = (
+                product_id
+            )
+
+            session.selected_product_ids = [
+                product_id
+            ]
+
+        else:
+
+            session.focused_product_id = None
+
+        self._touch(
+            session
+        )
+
+    def clear_selection(
+        self,
+        session_id: str,
+    ) -> None:
+
+        session = self.get_session(
+            session_id
+        )
+
+        session.selected_product_ids = []
+        session.focused_product_id = None
+
+        self._touch(
+            session
+        )
+
+    # =================================================
+    # SEARCH STATE
+    # =================================================
 
     def get_active_filters(
         self,
@@ -187,8 +375,8 @@ class ConversationService:
             in_stock=source.in_stock,
 
             facets={
-                field: set(values)
-                for field, values
+                key: set(values)
+                for key, values
                 in source.facets.items()
             },
         )
@@ -214,37 +402,14 @@ class ConversationService:
             session_id
         )
 
-        session.active_product_ids = [
-            str(
-                product["product_id"]
-            )
-            for product in products
-            if product.get(
-                "product_id"
-            )
-        ]
-
         session.active_filters = filters
 
         session.semantic_query = (
             semantic_query.strip()
         )
 
-        self._touch(
-            session
-        )
-
-    def set_active_products(
-        self,
-        session_id: str,
-        products: list[dict],
-    ) -> None:
-
-        session = self.get_session(
-            session_id
-        )
-
-        session.active_product_ids = [
+        # New retrieval results.
+        session.last_result_product_ids = [
             str(
                 product["product_id"]
             )
@@ -254,24 +419,18 @@ class ConversationService:
             )
         ]
 
-        self._touch(
-            session
-        )
-
-    def clear_active_products(
-        self,
-        session_id: str,
-    ) -> None:
-
-        session = self.get_session(
-            session_id
-        )
-
-        session.active_product_ids = []
+        # Fresh/refined search invalidates old
+        # focused/selected products.
+        session.selected_product_ids = []
+        session.focused_product_id = None
 
         self._touch(
             session
         )
+
+    # =================================================
+    # MESSAGES
+    # =================================================
 
     def add_user_message(
         self,
@@ -293,8 +452,13 @@ class ConversationService:
 
         session.last_mode = mode
 
-        self._trim(session)
-        self._touch(session)
+        self._trim(
+            session
+        )
+
+        self._touch(
+            session
+        )
 
     def add_assistant_message(
         self,
@@ -313,8 +477,17 @@ class ConversationService:
             )
         )
 
-        self._trim(session)
-        self._touch(session)
+        self._trim(
+            session
+        )
+
+        self._touch(
+            session
+        )
+
+    # =================================================
+    # INTERNAL
+    # =================================================
 
     @staticmethod
     def _trim(
@@ -326,7 +499,9 @@ class ConversationService:
             2,
         )
 
-        if len(session.turns) > max_turns:
+        if len(
+            session.turns
+        ) > max_turns:
 
             session.turns = (
                 session.turns[
@@ -339,8 +514,10 @@ class ConversationService:
         session: ConversationSession,
     ) -> None:
 
-        session.updated_at = datetime.now(
-            timezone.utc
+        session.updated_at = (
+            datetime.now(
+                timezone.utc
+            )
         )
 
 
