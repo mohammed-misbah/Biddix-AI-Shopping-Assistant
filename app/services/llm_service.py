@@ -20,10 +20,13 @@ class LLMService:
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(
                 connect=5.0,
+
                 read=float(
                     settings.HARD_TIMEOUT_SECONDS
                 ),
+
                 write=10.0,
+
                 pool=5.0,
             )
         )
@@ -83,6 +86,7 @@ class LLMService:
                     ],
                 }
             ],
+
             "generationConfig": {
                 "thinkingConfig": {
                     "thinkingLevel":
@@ -101,12 +105,10 @@ class LLMService:
 
         try:
 
-            response = (
-                await self.client.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                )
+            response = await self.client.post(
+                url,
+                headers=headers,
+                json=payload,
             )
 
             response.raise_for_status()
@@ -127,26 +129,7 @@ class LLMService:
 
                 return self._fallback()
 
-            candidate = candidates[
-                0
-            ]
-
-            finish_reason = (
-                candidate.get(
-                    "finishReason"
-                )
-            )
-
-            usage = data.get(
-                "usageMetadata",
-                {},
-            )
-
-            logger.info(
-                "Gemini finish_reason=%s usage=%s",
-                finish_reason,
-                usage,
-            )
+            candidate = candidates[0]
 
             parts = (
                 candidate
@@ -165,7 +148,9 @@ class LLMService:
                     "text",
                     "",
                 )
+
                 for part in parts
+
                 if part.get(
                     "text"
                 )
@@ -174,7 +159,7 @@ class LLMService:
             if not answer:
 
                 logger.error(
-                    "Gemini returned empty answer."
+                    "Gemini returned empty output."
                 )
 
                 return self._fallback()
@@ -222,18 +207,18 @@ class LLMService:
 
         for product in products:
 
-            safe_product = dict(
+            safe = dict(
                 product
             )
 
-            availability_confirmed = (
+            confirmed = (
                 product.get(
                     "availability_confirmed"
                 )
                 is True
             )
 
-            if availability_confirmed:
+            if confirmed:
 
                 try:
 
@@ -248,14 +233,9 @@ class LLMService:
                     TypeError,
                     ValueError,
                 ):
-
                     stock = 0
 
-                safe_product[
-                    "stock"
-                ] = stock
-
-                safe_product[
+                safe[
                     "availability_status"
                 ] = (
                     "in_stock"
@@ -263,21 +243,23 @@ class LLMService:
                     else "out_of_stock"
                 )
 
+                safe[
+                    "stock"
+                ] = stock
+
             else:
 
-                # Raw JSON stock is not trusted
-                # as live production inventory.
-                safe_product.pop(
+                safe.pop(
                     "stock",
                     None,
                 )
 
-                safe_product[
+                safe[
                     "availability_status"
                 ] = "unconfirmed"
 
             safe_products.append(
-                safe_product
+                safe
             )
 
         return safe_products

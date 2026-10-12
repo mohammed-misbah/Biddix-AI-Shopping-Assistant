@@ -16,6 +16,12 @@ ResponseStyle = Literal[
     "detailed",
 ]
 
+FollowUpType = Literal[
+    "none",
+    "reuse_products",
+    "refine_search",
+]
+
 
 @dataclass(frozen=True)
 class QueryRoute:
@@ -23,19 +29,12 @@ class QueryRoute:
 
     strict_catalog_match: bool = False
 
-    # Is this message continuing the previous turn?
     is_follow_up: bool = False
 
-    # Does the user add/change search requirements?
-    # Example:
-    # "Only silver ones."
-    refresh_products: bool = False
+    follow_up_type: FollowUpType = "none"
 
     response_style: ResponseStyle = "normal"
 
-    # Example:
-    # "Which one?" -> 1
-    # "Choose two" -> 2
     selection_limit: int | None = None
 
 
@@ -53,20 +52,16 @@ class QueryRouter:
         r"\bwhy\b",
         r"\borigin\b",
         r"\borigins\b",
-        r"\bspeciality\b",
-        r"\bspecialty\b",
         r"\bmeaning\b",
         r"\bfamous\b",
-        r"\bminted\b",
+        r"\bspecial\b",
+        r"\bspeciality\b",
+        r"\bspecialty\b",
         r"\binformation about\b",
         r"\bdetails about\b",
         r"\bdetail about\b",
-        r"\bmore about\b",
-        r"\boverview of\b",
-        r"\bsummary of\b",
-        r"\bknowledge about\b",
-        r"\bhow were\b",
-        r"\bhow was\b",
+        r"\boverview\b",
+        r"\bsummarize\b",
     )
 
     CATALOG_PATTERNS = (
@@ -80,7 +75,6 @@ class QueryRouter:
         r"\bbuy\b",
         r"\bpurchase\b",
         r"\brecommend\b",
-        r"\brecommendation\b",
         r"\bsuggest\b",
         r"\bshow me\b",
         r"\bfind me\b",
@@ -88,18 +82,8 @@ class QueryRouter:
         r"\bi need\b",
         r"\bi want\b",
         r"\bbudget\b",
-        r"\bunder\s+\d+",
-        r"\bbelow\s+\d+",
-        r"\bless than\s+\d+",
-        r"\bgreater than\s+\d+",
-        r"\bmore than\s+\d+",
-        r"\bover\s+\d+",
-        r"\babove\s+\d+",
-        r"\bat least\s+\d+",
-        r"\bup to\s+\d+",
-        r"\bcheapest\b",
-        r"\bpremium\b",
         r"\bgift\b",
+        r"\bcollection\b",
         r"\bexplore\b",
     )
 
@@ -110,73 +94,54 @@ class QueryRouter:
         r"\bavailable\b",
         r"\bin stock\b",
         r"\bstock\b",
-        r"\bcarry\b",
     )
 
-    FOLLOW_UP_PATTERNS = (
-        r"^\s*make (it )?(even )?(more )?short(er)?",
-        r"^\s*(even )?(more )?short(er)?",
-        r"^\s*simple explanation",
-        r"^\s*small explanation",
-        r"^\s*brief explanation",
-        r"^\s*explain (a little )?more",
-        r"^\s*tell me more",
-        r"^\s*more details?",
-        r"^\s*more information",
-        r"^\s*why\s*\??\s*$",
-        r"^\s*how\s*\??\s*$",
-        r"^\s*what about",
-        r"^\s*which one",
-        r"^\s*which is",
-        r"^\s*choose one",
-        r"^\s*choose two",
-        r"^\s*choose one or two",
-        r"^\s*choose .* from .* listed",
-        r"^\s*compare them",
-        r"^\s*compare these",
-        r"^\s*compare only",
-        r"^\s*the first one",
-        r"^\s*the second one",
-        r"^\s*the third one",
-        r"^\s*this one",
-        r"^\s*that one",
-        r"^\s*tell me more about that",
-        r"^\s*tell me more about this",
+    PRODUCT_REFERENCE_PATTERNS = (
+        r"\bwhich one\b",
+        r"\bwhich ones\b",
+        r"\bwhich is cheaper\b",
+        r"\bwhich is cheapest\b",
+        r"\bwhich is the cheapest\b",
+        r"\bwhich is better\b",
+        r"\bchoose one\b",
+        r"\bchoose two\b",
+        r"\bchoose one or two\b",
+        r"\bpick one\b",
+        r"\bpick two\b",
+        r"\bcompare them\b",
+        r"\bcompare these\b",
+        r"\bcompare those\b",
+        r"\bthose two\b",
+        r"\bthese two\b",
+        r"\bthat coin\b",
+        r"\bthis coin\b",
+        r"\bthat one\b",
+        r"\bthis one\b",
+        r"\bfirst one\b",
+        r"\bsecond one\b",
+        r"\bthird one\b",
+        r"\btell me more about that\b",
+        r"\btell me more about this\b",
     )
 
-    # If one of these appears in a follow-up,
-    # we must run retrieval again.
-    #
-    # Example:
-    #
-    # Previous:
-    # "UAE coins above 500"
-    #
-    # New:
-    # "Only silver ones"
-    #
-    # We need a NEW search while keeping the
-    # previous search requirements.
-    SEARCH_REFRESH_PATTERNS = (
-        r"\b(19|20)\d{2}\b",
-        r"\bunder\s+\d+",
-        r"\bbelow\s+\d+",
-        r"\bless than\s+\d+",
-        r"\bgreater than\s+\d+",
-        r"\bmore than\s+\d+",
-        r"\bover\s+\d+",
-        r"\babove\s+\d+",
-        r"\bat least\s+\d+",
-        r"\bup to\s+\d+",
+    REFINEMENT_PATTERNS = (
+        r"\bonly\b",
+        r"\binstead\b",
+        r"\bunder\s*(?:aed\s*)?\d+",
+        r"\bbelow\s*(?:aed\s*)?\d+",
+        r"\bless than\s*(?:aed\s*)?\d+",
+        r"\bover\s*(?:aed\s*)?\d+",
+        r"\babove\s*(?:aed\s*)?\d+",
+        r"\bgreater than\s*(?:aed\s*)?\d+",
+        r"\bmore than\s*(?:aed\s*)?\d+",
+        r"\bat least\s*(?:aed\s*)?\d+",
+        r"\bup to\s*(?:aed\s*)?\d+",
+        r"\bmaximum\b",
+        r"\bminimum\b",
         r"\bbudget\b",
-        r"\bsilver\b",
-        r"\bgold\b",
-        r"\bcopper\b",
-        r"\bbronze\b",
-        r"\bplatinum\b",
+        r"\b(19|20)\d{2}\b",
         r"\bin stock\b",
         r"\bavailable\b",
-        r"\bonly\b",
     )
 
     VERY_BRIEF_PATTERNS = (
@@ -193,21 +158,16 @@ class QueryRouter:
         r"\bshorter\b",
         r"\bbrief\b",
         r"\bbriefly\b",
+        r"\bconcise\b",
         r"\bsimple explanation\b",
         r"\bsmall explanation\b",
-        r"\bin short\b",
-        r"\bsummarize\b",
-        r"\bsummary\b",
-        r"\bconcise\b",
-        r"\bshort paragraph\b",
     )
 
     DETAILED_PATTERNS = (
         r"\bmore detail\b",
         r"\bmore details\b",
-        r"\bexplain more\b",
-        r"\bexplain a little more\b",
         r"\bmore information\b",
+        r"\bexplain more\b",
         r"\bdetailed\b",
         r"\bin depth\b",
         r"\belaborate\b",
@@ -223,43 +183,48 @@ class QueryRouter:
 
         if not text:
             return QueryRoute(
-                mode=previous_mode or "catalog",
+                mode=previous_mode or "catalog"
             )
 
-        response_style = self._detect_response_style(
-            text
+        response_style = (
+            self._detect_response_style(text)
         )
 
-        selection_limit = self._detect_selection_limit(
-            text
+        selection_limit = (
+            self._detect_selection_limit(text)
         )
 
-        # -------------------------------------------------
-        # Clear conversational follow-up
-        # -------------------------------------------------
+        # -----------------------------------------
+        # Product-reference follow-up
+        # -----------------------------------------
 
         if (
-            previous_mode is not None
+            previous_mode in ("catalog", "mixed")
             and self._matches_any(
                 text,
-                self.FOLLOW_UP_PATTERNS,
+                self.PRODUCT_REFERENCE_PATTERNS,
             )
         ):
-            refresh_products = (
-                previous_mode in (
-                    "catalog",
-                    "mixed",
-                )
-                and self._matches_any(
-                    text,
-                    self.SEARCH_REFRESH_PATTERNS,
-                )
-            )
-
             return QueryRoute(
                 mode=previous_mode,
                 is_follow_up=True,
-                refresh_products=refresh_products,
+                follow_up_type="reuse_products",
+                response_style=response_style,
+                selection_limit=selection_limit,
+            )
+
+        # -----------------------------------------
+        # Search refinement
+        # -----------------------------------------
+
+        if (
+            previous_mode in ("catalog", "mixed")
+            and self._looks_like_refinement(text)
+        ):
+            return QueryRoute(
+                mode=previous_mode,
+                is_follow_up=True,
+                follow_up_type="refine_search",
                 response_style=response_style,
                 selection_limit=selection_limit,
             )
@@ -279,21 +244,12 @@ class QueryRouter:
             self.STRICT_CATALOG_PATTERNS,
         )
 
-        # -------------------------------------------------
-        # New mixed question
-        # -------------------------------------------------
-
         if knowledge and catalog:
             return QueryRoute(
                 mode="mixed",
                 strict_catalog_match=strict_catalog,
                 response_style=response_style,
-                selection_limit=selection_limit,
             )
-
-        # -------------------------------------------------
-        # New knowledge question
-        # -------------------------------------------------
 
         if knowledge:
             return QueryRoute(
@@ -301,45 +257,28 @@ class QueryRouter:
                 response_style=response_style,
             )
 
-        # -------------------------------------------------
-        # New catalog question
-        # -------------------------------------------------
-
         if catalog:
             return QueryRoute(
                 mode="catalog",
                 strict_catalog_match=strict_catalog,
                 response_style=response_style,
-                selection_limit=selection_limit,
             )
 
-        # -------------------------------------------------
-        # Ambiguous message but we already have context
-        #
-        # Example:
-        # "Only silver ones."
-        #
-        # No normal catalog phrase is present,
-        # but it is clearly modifying the previous query.
-        # -------------------------------------------------
+        # -----------------------------------------
+        # Normal conversation continuation
+        # -----------------------------------------
 
         if previous_mode is not None:
-
-            refresh_products = (
-                previous_mode in (
-                    "catalog",
-                    "mixed",
-                )
-                and self._matches_any(
-                    text,
-                    self.SEARCH_REFRESH_PATTERNS,
-                )
-            )
 
             return QueryRoute(
                 mode=previous_mode,
                 is_follow_up=True,
-                refresh_products=refresh_products,
+                follow_up_type=(
+                    "reuse_products"
+                    if previous_mode
+                    in ("catalog", "mixed")
+                    else "none"
+                ),
                 response_style=response_style,
                 selection_limit=selection_limit,
             )
@@ -348,6 +287,31 @@ class QueryRouter:
             mode="catalog",
             response_style=response_style,
         )
+
+    def _looks_like_refinement(
+        self,
+        text: str,
+    ) -> bool:
+
+        if self._matches_any(
+            text,
+            self.REFINEMENT_PATTERNS,
+        ):
+            return True
+
+        # Short fragments such as:
+        #
+        # "silver ones"
+        # "gold only"
+        # "2024"
+        #
+        # are commonly refinements.
+        words = text.split()
+
+        if len(words) <= 5:
+            return True
+
+        return False
 
     def _detect_response_style(
         self,
@@ -379,69 +343,29 @@ class QueryRouter:
         text: str,
     ) -> int | None:
 
-        # One explicit choice
         if re.search(
-            r"\bwhich one\b",
+            r"\b(which one|pick one|choose one)\b",
             text,
-            re.IGNORECASE,
         ):
             return 1
 
         if re.search(
-            r"\bwhich is the cheapest\b",
+            r"\bcheapest\b",
             text,
-            re.IGNORECASE,
         ):
             return 1
 
         if re.search(
-            r"\bwhich is cheapest\b",
+            r"\btell me more about (that|this)\b",
             text,
-            re.IGNORECASE,
         ):
             return 1
 
         if re.search(
-            r"\btell me more about (that|this) coin\b",
+            r"\b(one or two|choose two|pick two|those two|these two)\b",
             text,
-            re.IGNORECASE,
-        ):
-            return 1
-
-        if re.search(
-            r"\bchoose one or two\b",
-            text,
-            re.IGNORECASE,
         ):
             return 2
-
-        if re.search(
-            r"\bone or two\b",
-            text,
-            re.IGNORECASE,
-        ):
-            return 2
-
-        if re.search(
-            r"\bchoose two\b",
-            text,
-            re.IGNORECASE,
-        ):
-            return 2
-
-        if re.search(
-            r"\bthose two\b",
-            text,
-            re.IGNORECASE,
-        ):
-            return 2
-
-        if re.search(
-            r"\bchoose one\b",
-            text,
-            re.IGNORECASE,
-        ):
-            return 1
 
         return None
 

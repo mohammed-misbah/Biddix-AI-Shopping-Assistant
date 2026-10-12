@@ -13,7 +13,43 @@ QueryMode = Literal[
 
 
 @dataclass
+class CatalogFilters:
+
+    year: int | None = None
+
+    min_price: float | None = None
+    min_price_inclusive: bool = False
+
+    max_price: float | None = None
+    max_price_inclusive: bool = True
+
+    material: str | None = None
+
+    in_stock: bool = False
+
+    # Generic catalog facets.
+    #
+    # Possible examples:
+    # country
+    # region
+    # category
+    # theme
+    # era
+    # period
+    # denomination
+    #
+    # Nothing is country-specific.
+    facets: dict[
+        str,
+        set[str],
+    ] = field(
+        default_factory=dict
+    )
+
+
+@dataclass
 class ConversationTurn:
+
     role: Literal[
         "user",
         "assistant",
@@ -33,29 +69,26 @@ class ConversationSession:
 
     last_mode: QueryMode | None = None
 
-    # Products currently being discussed.
-    #
-    # Example:
-    # User searches 5 products.
-    # Then chooses 2.
-    #
-    # This becomes those 2.
+    # Products that the customer is
+    # currently talking about.
     active_product_ids: list[str] = field(
         default_factory=list
     )
 
-    # The last actual catalog search query.
+    # Search constraints persist across
+    # refinement turns.
+    active_filters: CatalogFilters = field(
+        default_factory=CatalogFilters
+    )
+
+    # Semantic meaning of the current search.
     #
     # Example:
-    # "UAE coins above 500 AED"
+    # "meaningful historical collector coin"
     #
-    # This lets:
-    # "Only silver ones"
-    #
-    # become:
-    #
-    # "UAE coins above 500 AED. Only silver ones."
-    active_catalog_query: str | None = None
+    # Geography/themes remain semantic unless
+    # the catalog supplies structured facets.
+    semantic_query: str = ""
 
     updated_at: datetime = field(
         default_factory=lambda: (
@@ -121,28 +154,60 @@ class ConversationService:
         session_id: str,
     ) -> list[str]:
 
-        session = self.get_session(
-            session_id
-        )
-
         return list(
-            session.active_product_ids
+            self.get_session(
+                session_id
+            ).active_product_ids
         )
 
-    def get_active_catalog_query(
+    def get_active_filters(
         self,
         session_id: str,
-    ) -> str | None:
+    ) -> CatalogFilters:
+
+        source = self.get_session(
+            session_id
+        ).active_filters
+
+        return CatalogFilters(
+            year=source.year,
+
+            min_price=source.min_price,
+            min_price_inclusive=(
+                source.min_price_inclusive
+            ),
+
+            max_price=source.max_price,
+            max_price_inclusive=(
+                source.max_price_inclusive
+            ),
+
+            material=source.material,
+
+            in_stock=source.in_stock,
+
+            facets={
+                field: set(values)
+                for field, values
+                in source.facets.items()
+            },
+        )
+
+    def get_semantic_query(
+        self,
+        session_id: str,
+    ) -> str:
 
         return self.get_session(
             session_id
-        ).active_catalog_query
+        ).semantic_query
 
-    def set_product_context(
+    def set_search_state(
         self,
         session_id: str,
         products: list[dict],
-        catalog_query: str | None = None,
+        filters: CatalogFilters,
+        semantic_query: str,
     ) -> None:
 
         session = self.get_session(
@@ -151,9 +216,7 @@ class ConversationService:
 
         session.active_product_ids = [
             str(
-                product.get(
-                    "product_id"
-                )
+                product["product_id"]
             )
             for product in products
             if product.get(
@@ -161,15 +224,14 @@ class ConversationService:
             )
         ]
 
-        if catalog_query is not None:
-            session.active_catalog_query = (
-                catalog_query
-            )
+        session.active_filters = filters
 
-        session.updated_at = (
-            datetime.now(
-                timezone.utc
-            )
+        session.semantic_query = (
+            semantic_query.strip()
+        )
+
+        self._touch(
+            session
         )
 
     def set_active_products(
@@ -178,33 +240,13 @@ class ConversationService:
         products: list[dict],
     ) -> None:
 
-        """
-        Narrow the current product conversation.
-
-        Example:
-
-        Previous products:
-        A, B, C, D, E
-
-        Customer:
-        "Choose two."
-
-        Gemini chooses:
-        A, C
-
-        Active product context becomes:
-        A, C
-        """
-
         session = self.get_session(
             session_id
         )
 
         session.active_product_ids = [
             str(
-                product.get(
-                    "product_id"
-                )
+                product["product_id"]
             )
             for product in products
             if product.get(
@@ -212,13 +254,11 @@ class ConversationService:
             )
         ]
 
-        session.updated_at = (
-            datetime.now(
-                timezone.utc
-            )
+        self._touch(
+            session
         )
 
-    def clear_product_context(
+    def clear_active_products(
         self,
         session_id: str,
     ) -> None:
@@ -229,10 +269,8 @@ class ConversationService:
 
         session.active_product_ids = []
 
-        session.updated_at = (
-            datetime.now(
-                timezone.utc
-            )
+        self._touch(
+            session
         )
 
     def add_user_message(
@@ -255,15 +293,8 @@ class ConversationService:
 
         session.last_mode = mode
 
-        session.updated_at = (
-            datetime.now(
-                timezone.utc
-            )
-        )
-
-        self._trim(
-            session
-        )
+        self._trim(session)
+        self._touch(session)
 
     def add_assistant_message(
         self,
@@ -282,15 +313,8 @@ class ConversationService:
             )
         )
 
-        session.updated_at = (
-            datetime.now(
-                timezone.utc
-            )
-        )
-
-        self._trim(
-            session
-        )
+        self._trim(session)
+        self._touch(session)
 
     @staticmethod
     def _trim(
@@ -302,9 +326,7 @@ class ConversationService:
             2,
         )
 
-        if len(
-            session.turns
-        ) > max_turns:
+        if len(session.turns) > max_turns:
 
             session.turns = (
                 session.turns[
@@ -312,7 +334,14 @@ class ConversationService:
                 ]
             )
 
+    @staticmethod
+    def _touch(
+        session: ConversationSession,
+    ) -> None:
 
-conversation_service = (
-    ConversationService()
-)
+        session.updated_at = datetime.now(
+            timezone.utc
+        )
+
+
+conversation_service = ConversationService()
