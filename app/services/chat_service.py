@@ -1,4 +1,5 @@
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -27,18 +28,13 @@ class ChatService:
         session_id: str | None = None,
     ):
 
-        # =================================================
-        # 1. SESSION
-        # =================================================
-
         if not session_id:
-
             session_id = str(
                 uuid.uuid4()
             )
 
         # =================================================
-        # 2. READ CURRENT STATE
+        # Existing state
         # =================================================
 
         previous_mode = (
@@ -91,7 +87,7 @@ class ChatService:
         )
 
         # =================================================
-        # 3. ROUTE MESSAGE
+        # Route current message
         # =================================================
 
         route = query_router.route(
@@ -103,13 +99,11 @@ class ChatService:
             "Chat route mode=%s "
             "follow_up=%s "
             "type=%s "
-            "action=%s "
-            "selection_limit=%s",
+            "action=%s",
             route.mode,
             route.is_follow_up,
             route.follow_up_type,
             route.product_action,
-            route.selection_limit,
         )
 
         products: list[
@@ -117,7 +111,7 @@ class ChatService:
         ] = []
 
         # =================================================
-        # 4. KNOWLEDGE
+        # Knowledge mode
         # =================================================
 
         if route.mode == "knowledge":
@@ -125,17 +119,13 @@ class ChatService:
             products = []
 
         # =================================================
-        # 5. CATALOG / MIXED
+        # Catalog / mixed
         # =================================================
 
         else:
 
             # ---------------------------------------------
-            # A. FOCUSED PRODUCT
-            #
-            # "Tell me more about that coin."
-            #
-            # Never run FAISS.
+            # Reuse focused product
             # ---------------------------------------------
 
             if (
@@ -157,11 +147,7 @@ class ChatService:
                     products = []
 
             # ---------------------------------------------
-            # B. PREVIOUS SELECTED PRODUCTS
-            #
-            # "Compare those two."
-            #
-            # Never run FAISS.
+            # Reuse selected products
             # ---------------------------------------------
 
             elif (
@@ -169,26 +155,17 @@ class ChatService:
                 == "reuse_selection"
             ):
 
-                if selected_ids:
-
-                    products = (
-                        retrieval_service
-                        .get_products_by_ids(
-                            selected_ids
-                        )
+                products = (
+                    retrieval_service
+                    .get_products_by_ids(
+                        selected_ids
                     )
-
-                else:
-
-                    products = []
+                    if selected_ids
+                    else []
+                )
 
             # ---------------------------------------------
-            # C. LAST FULL SEARCH RESULTS
-            #
-            # "Which is cheapest?"
-            # "Choose two."
-            #
-            # Never run FAISS.
+            # Reuse last full result set
             # ---------------------------------------------
 
             elif (
@@ -196,30 +173,17 @@ class ChatService:
                 == "reuse_results"
             ):
 
-                if last_result_ids:
-
-                    products = (
-                        retrieval_service
-                        .get_products_by_ids(
-                            last_result_ids
-                        )
+                products = (
+                    retrieval_service
+                    .get_products_by_ids(
+                        last_result_ids
                     )
-
-                else:
-
-                    products = []
+                    if last_result_ids
+                    else []
+                )
 
             # ---------------------------------------------
-            # D. SEARCH REFINEMENT
-            #
-            # Existing:
-            # > 500
-            #
-            # New:
-            # only silver
-            #
-            # Result:
-            # >500 + silver
+            # Refine existing search
             # ---------------------------------------------
 
             elif (
@@ -261,11 +225,13 @@ class ChatService:
                     session_id=session_id,
                     products=products,
                     filters=new_filters,
-                    semantic_query=semantic_query,
+                    semantic_query=(
+                        semantic_query
+                    ),
                 )
 
             # ---------------------------------------------
-            # E. FRESH SEARCH
+            # Fresh search
             # ---------------------------------------------
 
             else:
@@ -298,15 +264,29 @@ class ChatService:
                 )
 
         # =================================================
-        # 6. DETERMINISTIC PRODUCT ACTIONS
-        # =================================================
-        #
-        # Do things Python can determine safely.
-        #
-        # Cheapest should not depend on Gemini.
+        # Deterministic product-reference resolution
         # =================================================
 
         if (
+            route.product_action
+            == "availability"
+        ):
+
+            products = (
+                self._resolve_referenced_products(
+                    message=message,
+                    products=products,
+                )
+            )
+
+            if len(products) == 1:
+
+                conversation_service.set_focused_product(
+                    session_id=session_id,
+                    product=products[0],
+                )
+
+        elif (
             route.product_action
             == "cheapest"
         ):
@@ -325,7 +305,7 @@ class ChatService:
                 )
 
         # =================================================
-        # 7. HISTORY
+        # Conversation history
         # =================================================
 
         conversation_history = (
@@ -334,7 +314,6 @@ class ChatService:
             )
         )
 
-        # Save user message AFTER reading old history.
         conversation_service.add_user_message(
             session_id=session_id,
             message=message,
@@ -342,7 +321,7 @@ class ChatService:
         )
 
         # =================================================
-        # 8. GEMINI
+        # Generate response
         # =================================================
 
         answer = await llm_service.generate_response(
@@ -363,7 +342,7 @@ class ChatService:
         )
 
         # =================================================
-        # 9. KNOWLEDGE HAS NO PRODUCT CARDS
+        # Knowledge responses have no cards
         # =================================================
 
         if route.mode == "knowledge":
@@ -374,10 +353,6 @@ class ChatService:
                 "products": [],
             }
 
-        # =================================================
-        # 10. ORDER PRODUCTS BY ANSWER
-        # =================================================
-
         ordered_products = (
             self._order_products_by_answer(
                 products=products,
@@ -386,16 +361,7 @@ class ChatService:
         )
 
         # =================================================
-        # 11. CHOOSE ACTION
-        # =================================================
-        #
-        # If customer asks:
-        #
-        # "Choose two"
-        #
-        # Gemini decides based on the supplied products.
-        #
-        # We detect which exact product names Gemini used.
+        # Choose one/two
         # =================================================
 
         if (
@@ -413,11 +379,6 @@ class ChatService:
                 )
             )
 
-            # Safety fallback:
-            #
-            # if Gemini did not explicitly mention
-            # enough names, keep only names it did
-            # mention rather than inventing another.
             conversation_service.set_selected_products(
                 session_id=session_id,
                 products=selected_products,
@@ -437,60 +398,116 @@ class ChatService:
                 selected_products
             )
 
-        # =================================================
-        # 12. CHEAPEST ACTION
-        # =================================================
-
-        elif (
-            route.product_action
-            == "cheapest"
-        ):
-
-            ordered_products = products
-
-        # =================================================
-        # 13. DETAIL ACTION
-        # =================================================
-
-        elif (
-            route.product_action
-            == "detail"
-        ):
-
-            ordered_products = products
-
-        # =================================================
-        # 14. COMPARE ACTION
-        # =================================================
-
-        elif (
-            route.product_action
-            == "compare"
-        ):
-
-            # Exactly the selected set.
-            ordered_products = products
-
-        # =================================================
-        # 15. RESPONSE
-        # =================================================
-
-        response_products = [
-            self._serialize_product(
-                product
-            )
-            for product
-            in ordered_products
-        ]
-
         return {
             "answer": answer,
             "session_id": session_id,
-            "products": response_products,
+            "products": [
+                self._serialize_product(
+                    product
+                )
+                for product
+                in ordered_products
+            ],
         }
 
     # =====================================================
-    # CHEAPEST
+    # Resolve references
+    # =====================================================
+
+    def _resolve_referenced_products(
+        self,
+        message: str,
+        products: list[
+            dict[str, Any]
+        ],
+    ) -> list[
+        dict[str, Any]
+    ]:
+
+        if not products:
+            return []
+
+        text = message.lower()
+
+        # ---------------------------------------------
+        # Cheaper / cheapest one
+        # ---------------------------------------------
+
+        if re.search(
+            r"\b("
+            r"cheaper one"
+            r"|cheapest one"
+            r")\b",
+            text,
+        ):
+
+            cheapest = (
+                self._choose_cheapest(
+                    products
+                )
+            )
+
+            return cheapest
+
+        # ---------------------------------------------
+        # More expensive / expensive one
+        # ---------------------------------------------
+
+        if re.search(
+            r"\b("
+            r"more expensive one"
+            r"|expensive one"
+            r"|most expensive one"
+            r")\b",
+            text,
+        ):
+
+            return self._choose_most_expensive(
+                products
+            )
+
+        # ---------------------------------------------
+        # First / second / third
+        # ---------------------------------------------
+
+        if re.search(
+            r"\bfirst one\b",
+            text,
+        ):
+
+            return products[:1]
+
+        if re.search(
+            r"\bsecond one\b",
+            text,
+        ):
+
+            return (
+                products[1:2]
+                if len(products) >= 2
+                else []
+            )
+
+        if re.search(
+            r"\bthird one\b",
+            text,
+        ):
+
+            return (
+                products[2:3]
+                if len(products) >= 3
+                else []
+            )
+
+        # If there is exactly one supplied product,
+        # a singular reference naturally points to it.
+        if len(products) == 1:
+            return products
+
+        return products
+
+    # =====================================================
+    # Cheapest
     # =====================================================
 
     @staticmethod
@@ -502,7 +519,7 @@ class ChatService:
         dict[str, Any]
     ]:
 
-        valid = []
+        priced = []
 
         for product in products:
 
@@ -518,30 +535,80 @@ class ChatService:
                 TypeError,
                 ValueError,
             ):
-
                 continue
 
-            valid.append(
+            priced.append(
                 (
                     price,
                     product,
                 )
             )
 
-        if not valid:
+        if not priced:
             return []
 
-        valid.sort(
+        priced.sort(
             key=lambda item:
                 item[0]
         )
 
         return [
-            valid[0][1]
+            priced[0][1]
         ]
 
     # =====================================================
-    # SEMANTIC QUERY
+    # Most expensive
+    # =====================================================
+
+    @staticmethod
+    def _choose_most_expensive(
+        products: list[
+            dict[str, Any]
+        ],
+    ) -> list[
+        dict[str, Any]
+    ]:
+
+        priced = []
+
+        for product in products:
+
+            try:
+
+                price = float(
+                    product.get(
+                        "price"
+                    )
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            priced.append(
+                (
+                    price,
+                    product,
+                )
+            )
+
+        if not priced:
+            return []
+
+        priced.sort(
+            key=lambda item:
+                item[0],
+            reverse=True,
+        )
+
+        return [
+            priced[0][1]
+        ]
+
+    # =====================================================
+    # Semantic refinement query
     # =====================================================
 
     @staticmethod
@@ -570,7 +637,7 @@ class ChatService:
         )
 
     # =====================================================
-    # HISTORY
+    # Conversation history
     # =====================================================
 
     @staticmethod
@@ -581,7 +648,7 @@ class ChatService:
         if not history:
             return ""
 
-        parts = []
+        lines = []
 
         for turn in history:
 
@@ -591,17 +658,17 @@ class ChatService:
                 else "Assistant"
             )
 
-            parts.append(
+            lines.append(
                 f"{role}: "
                 f"{turn.content}"
             )
 
         return "\n".join(
-            parts
+            lines
         )
 
     # =====================================================
-    # PRODUCT MENTION DETECTION
+    # Product names selected by Gemini
     # =====================================================
 
     @staticmethod
@@ -660,7 +727,7 @@ class ChatService:
         ]
 
     # =====================================================
-    # CARD ORDER
+    # Card ordering
     # =====================================================
 
     @staticmethod
@@ -693,17 +760,13 @@ class ChatService:
                 )
             ).strip()
 
-            if name:
-
-                position = (
-                    answer_lower.find(
-                        name.lower()
-                    )
+            position = (
+                answer_lower.find(
+                    name.lower()
                 )
-
-            else:
-
-                position = -1
+                if name
+                else -1
+            )
 
             if position >= 0:
 
@@ -740,7 +803,7 @@ class ChatService:
         ]
 
     # =====================================================
-    # API CARD
+    # API product card
     # =====================================================
 
     @staticmethod

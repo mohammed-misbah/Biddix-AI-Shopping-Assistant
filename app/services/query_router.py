@@ -30,12 +30,12 @@ ProductAction = Literal[
     "cheapest",
     "compare",
     "detail",
+    "availability",
 ]
 
 
 @dataclass(frozen=True)
 class QueryRoute:
-
     mode: QueryMode
 
     strict_catalog_match: bool = False
@@ -52,10 +52,6 @@ class QueryRoute:
 
 
 class QueryRouter:
-
-    # =================================================
-    # KNOWLEDGE
-    # =================================================
 
     KNOWLEDGE_PATTERNS = (
         r"\blearn\b",
@@ -76,10 +72,6 @@ class QueryRouter:
         r"\bfamous\b",
         r"\boverview\b",
     )
-
-    # =================================================
-    # CATALOG
-    # =================================================
 
     CATALOG_PATTERNS = (
         r"\bdo you have\b",
@@ -112,10 +104,6 @@ class QueryRouter:
         r"\bstock\b",
     )
 
-    # =================================================
-    # REFINEMENTS
-    # =================================================
-
     REFINEMENT_PATTERNS = (
         r"\bonly\b",
         r"\binstead\b",
@@ -132,13 +120,7 @@ class QueryRouter:
         r"\bminimum\b",
         r"\bbudget\b",
         r"\b(19|20)\d{2}\b",
-        r"\bin stock\b",
-        r"\bavailable\b",
     )
-
-    # =================================================
-    # STYLES
-    # =================================================
 
     VERY_BRIEF_PATTERNS = (
         r"\beven shorter\b",
@@ -182,95 +164,103 @@ class QueryRouter:
         )
 
         if not text:
-
             return QueryRoute(
                 mode=previous_mode or "catalog",
                 response_style=style,
             )
 
         # =================================================
-        # 1. DETAIL ABOUT CURRENT FOCUSED PRODUCT
+        # IMPORTANT:
+        # Product references MUST be checked BEFORE
+        # search-refinement patterns such as "in stock".
         # =================================================
 
-        if (
-            previous_mode in (
-                "catalog",
-                "mixed",
-            )
-            and re.search(
+        if previous_mode in ("catalog", "mixed"):
+
+            # ---------------------------------------------
+            # Availability of one of the currently
+            # selected/focused products.
+            #
+            # Examples:
+            #
+            # Is the cheaper one in stock?
+            # Is that one available?
+            # Is that coin in stock?
+            # Is the expensive one available?
+            # ---------------------------------------------
+
+            if (
+                self._contains_availability_question(text)
+                and self._contains_product_reference(text)
+            ):
+                return QueryRoute(
+                    mode=previous_mode,
+                    is_follow_up=True,
+                    follow_up_type=self._reference_source(
+                        text
+                    ),
+                    product_action="availability",
+                    response_style=style,
+                    selection_limit=1,
+                )
+
+            # ---------------------------------------------
+            # Details about focused product
+            # ---------------------------------------------
+
+            if re.search(
                 r"\b(tell me more|more details?|more information)"
                 r"\s+(about\s+)?(that|this)"
                 r"\s+(coin|one|product)?\b",
                 text,
-            )
-        ):
+            ):
+                return QueryRoute(
+                    mode=previous_mode,
+                    is_follow_up=True,
+                    follow_up_type="reuse_focus",
+                    product_action="detail",
+                    response_style=style,
+                    selection_limit=1,
+                )
 
-            return QueryRoute(
-                mode=previous_mode,
-                is_follow_up=True,
-                follow_up_type="reuse_focus",
-                product_action="detail",
-                response_style=style,
-                selection_limit=1,
-            )
+            # ---------------------------------------------
+            # Compare selected products
+            # ---------------------------------------------
 
-        # =================================================
-        # 2. COMPARE PREVIOUS SELECTION
-        # =================================================
-
-        if (
-            previous_mode in (
-                "catalog",
-                "mixed",
-            )
-            and re.search(
+            if re.search(
                 r"\bcompare\b",
                 text,
-            )
-        ):
+            ):
+                return QueryRoute(
+                    mode=previous_mode,
+                    is_follow_up=True,
+                    follow_up_type="reuse_selection",
+                    product_action="compare",
+                    response_style=style,
+                )
 
-            return QueryRoute(
-                mode=previous_mode,
-                is_follow_up=True,
-                follow_up_type="reuse_selection",
-                product_action="compare",
-                response_style=style,
-            )
+            # ---------------------------------------------
+            # Cheapest from last result set
+            # ---------------------------------------------
 
-        # =================================================
-        # 3. CHEAPEST / BEST FROM LAST RESULT SET
-        # =================================================
-
-        if (
-            previous_mode in (
-                "catalog",
-                "mixed",
-            )
-            and re.search(
+            if re.search(
                 r"\bcheapest\b",
                 text,
-            )
-        ):
+            ):
+                return QueryRoute(
+                    mode=previous_mode,
+                    is_follow_up=True,
+                    follow_up_type="reuse_results",
+                    product_action="cheapest",
+                    response_style=style,
+                    selection_limit=1,
+                )
 
-            return QueryRoute(
-                mode=previous_mode,
-                is_follow_up=True,
-                follow_up_type="reuse_results",
-                product_action="cheapest",
-                response_style=style,
-                selection_limit=1,
-            )
+            # ---------------------------------------------
+            # Choose two from previous results
+            # ---------------------------------------------
 
-        # =================================================
-        # 4. CHOOSE TWO
-        # =================================================
-
-        if (
-            previous_mode in (
-                "catalog",
-                "mixed",
-            )
-            and re.search(
+            if re.search(
                 r"\b("
                 r"choose two"
                 r"|pick two"
@@ -278,28 +268,21 @@ class QueryRouter:
                 r"|one or two"
                 r")\b",
                 text,
-            )
-        ):
+            ):
+                return QueryRoute(
+                    mode=previous_mode,
+                    is_follow_up=True,
+                    follow_up_type="reuse_results",
+                    product_action="choose",
+                    response_style=style,
+                    selection_limit=2,
+                )
 
-            return QueryRoute(
-                mode=previous_mode,
-                is_follow_up=True,
-                follow_up_type="reuse_results",
-                product_action="choose",
-                response_style=style,
-                selection_limit=2,
-            )
+            # ---------------------------------------------
+            # Choose one from previous results
+            # ---------------------------------------------
 
-        # =================================================
-        # 5. CHOOSE ONE
-        # =================================================
-
-        if (
-            previous_mode in (
-                "catalog",
-                "mixed",
-            )
-            and re.search(
+            if re.search(
                 r"\b("
                 r"which one"
                 r"|choose one"
@@ -308,42 +291,53 @@ class QueryRouter:
                 r"|which would you choose"
                 r")\b",
                 text,
-            )
-        ):
+            ):
+                return QueryRoute(
+                    mode=previous_mode,
+                    is_follow_up=True,
+                    follow_up_type="reuse_results",
+                    product_action="choose",
+                    response_style=style,
+                    selection_limit=1,
+                )
 
-            return QueryRoute(
-                mode=previous_mode,
-                is_follow_up=True,
-                follow_up_type="reuse_results",
-                product_action="choose",
-                response_style=style,
-                selection_limit=1,
-            )
+            # ---------------------------------------------
+            # Generic references
+            # ---------------------------------------------
 
-        # =================================================
-        # 6. SEARCH REFINEMENT
-        # =================================================
+            if self._contains_product_reference(
+                text
+            ):
+                return QueryRoute(
+                    mode=previous_mode,
+                    is_follow_up=True,
+                    follow_up_type=self._reference_source(
+                        text
+                    ),
+                    response_style=style,
+                )
 
-        if (
-            previous_mode in (
-                "catalog",
-                "mixed",
-            )
-            and self._matches_any(
+            # ---------------------------------------------
+            # Search refinement
+            #
+            # IMPORTANT:
+            # This happens only AFTER product-reference
+            # handling.
+            # ---------------------------------------------
+
+            if self._matches_any(
                 text,
                 self.REFINEMENT_PATTERNS,
-            )
-        ):
-
-            return QueryRoute(
-                mode=previous_mode,
-                is_follow_up=True,
-                follow_up_type="refine_search",
-                response_style=style,
-            )
+            ):
+                return QueryRoute(
+                    mode=previous_mode,
+                    is_follow_up=True,
+                    follow_up_type="refine_search",
+                    response_style=style,
+                )
 
         # =================================================
-        # 7. NEW INTENT CLASSIFICATION
+        # Normal new-intent classification
         # =================================================
 
         knowledge = self._matches_any(
@@ -362,34 +356,27 @@ class QueryRouter:
         )
 
         if knowledge and catalog:
-
             return QueryRoute(
                 mode="mixed",
-                strict_catalog_match=(
-                    strict_catalog
-                ),
+                strict_catalog_match=strict_catalog,
                 response_style=style,
             )
 
         if knowledge:
-
             return QueryRoute(
                 mode="knowledge",
                 response_style=style,
             )
 
         if catalog:
-
             return QueryRoute(
                 mode="catalog",
-                strict_catalog_match=(
-                    strict_catalog
-                ),
+                strict_catalog_match=strict_catalog,
                 response_style=style,
             )
 
         # =================================================
-        # 8. GENERIC CONTINUATION
+        # Generic continuation
         # =================================================
 
         if previous_mode is not None:
@@ -411,9 +398,90 @@ class QueryRouter:
             response_style=style,
         )
 
-    # =================================================
-    # STYLE
-    # =================================================
+    # =====================================================
+    # Product-reference detection
+    # =====================================================
+
+    @staticmethod
+    def _contains_product_reference(
+        text: str,
+    ) -> bool:
+
+        patterns = (
+            r"\bthat coin\b",
+            r"\bthis coin\b",
+            r"\bthat one\b",
+            r"\bthis one\b",
+            r"\bthe cheaper one\b",
+            r"\bcheaper one\b",
+            r"\bthe cheapest one\b",
+            r"\bcheapest one\b",
+            r"\bthe more expensive one\b",
+            r"\bmore expensive one\b",
+            r"\bthe expensive one\b",
+            r"\bexpensive one\b",
+            r"\bthe first one\b",
+            r"\bfirst one\b",
+            r"\bthe second one\b",
+            r"\bsecond one\b",
+            r"\bthe third one\b",
+            r"\bthird one\b",
+            r"\bthose two\b",
+            r"\bthese two\b",
+            r"\bthem\b",
+        )
+
+        return any(
+            re.search(
+                pattern,
+                text,
+                re.IGNORECASE,
+            )
+            for pattern in patterns
+        )
+
+    @staticmethod
+    def _contains_availability_question(
+        text: str,
+    ) -> bool:
+
+        return any(
+            phrase in text
+            for phrase in (
+                "in stock",
+                "available",
+                "availability",
+                "out of stock",
+            )
+        )
+
+    @staticmethod
+    def _reference_source(
+        text: str,
+    ) -> FollowUpType:
+
+        # Comparative phrases refer naturally
+        # to a previously selected group.
+        if re.search(
+            r"\b("
+            r"cheaper one"
+            r"|cheapest one"
+            r"|more expensive one"
+            r"|expensive one"
+            r"|those two"
+            r"|these two"
+            r"|them"
+            r")\b",
+            text,
+        ):
+            return "reuse_selection"
+
+        # Direct singular references use focus.
+        return "reuse_focus"
+
+    # =====================================================
+    # Style
+    # =====================================================
 
     def _detect_response_style(
         self,
@@ -440,9 +508,9 @@ class QueryRouter:
 
         return "normal"
 
-    # =================================================
-    # HELPERS
-    # =================================================
+    # =====================================================
+    # Helpers
+    # =====================================================
 
     @staticmethod
     def _matches_any(
