@@ -5,7 +5,9 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
-from app.core.prompts import build_assistant_prompt
+from app.core.prompts import (
+    build_assistant_prompt,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -29,12 +31,22 @@ class LLMService:
     async def generate_response(
         self,
         user_message: str,
-        products: list[dict[str, Any]],
+        products: list[
+            dict[str, Any]
+        ],
         mode: str,
+        conversation_history: str = "",
+        response_style: str = "normal",
     ) -> str:
 
+        safe_products = (
+            self._prepare_products_for_llm(
+                products
+            )
+        )
+
         product_context = json.dumps(
-            products,
+            safe_products,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -43,12 +55,21 @@ class LLMService:
             user_message=user_message,
             mode=mode,
             product_context=product_context,
-            product_count=len(products),
+            product_count=len(
+                safe_products
+            ),
+            conversation_history=(
+                conversation_history
+            ),
+            response_style=(
+                response_style
+            ),
         )
 
         url = (
             f"{settings.API_BASE_URL}/"
-            f"{settings.GEMINI_MODEL}:generateContent"
+            f"{settings.GEMINI_MODEL}"
+            ":generateContent"
         )
 
         payload = {
@@ -64,23 +85,28 @@ class LLMService:
             ],
             "generationConfig": {
                 "thinkingConfig": {
-                    "thinkingLevel": "MINIMAL"
+                    "thinkingLevel":
+                        "MINIMAL"
                 }
             },
         }
 
         headers = {
-            "Content-Type": "application/json",
+            "Content-Type":
+                "application/json",
+
             "x-goog-api-key":
                 settings.GEMINI_API_KEY,
         }
 
         try:
 
-            response = await self.client.post(
-                url,
-                headers=headers,
-                json=payload,
+            response = (
+                await self.client.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                )
             )
 
             response.raise_for_status()
@@ -93,6 +119,7 @@ class LLMService:
             )
 
             if not candidates:
+
                 logger.error(
                     "Gemini returned no candidates: %s",
                     data,
@@ -100,10 +127,14 @@ class LLMService:
 
                 return self._fallback()
 
-            candidate = candidates[0]
+            candidate = (
+                candidates[0]
+            )
 
-            finish_reason = candidate.get(
-                "finishReason"
+            finish_reason = (
+                candidate.get(
+                    "finishReason"
+                )
             )
 
             usage = data.get(
@@ -119,22 +150,31 @@ class LLMService:
 
             parts = (
                 candidate
-                .get("content", {})
-                .get("parts", [])
+                .get(
+                    "content",
+                    {},
+                )
+                .get(
+                    "parts",
+                    [],
+                )
             )
 
             answer = "".join(
-                part.get("text", "")
+                part.get(
+                    "text",
+                    "",
+                )
                 for part in parts
-                if part.get("text")
+                if part.get(
+                    "text"
+                )
             ).strip()
 
             if not answer:
 
                 logger.error(
-                    "Gemini returned empty answer. "
-                    "finish_reason=%s",
-                    finish_reason,
+                    "Gemini returned an empty answer."
                 )
 
                 return self._fallback()
@@ -168,6 +208,77 @@ class LLMService:
             )
 
             return self._fallback()
+
+    @staticmethod
+    def _prepare_products_for_llm(
+        products: list[
+            dict[str, Any]
+        ],
+    ) -> list[dict[str, Any]]:
+
+        safe_products = []
+
+        for product in products:
+
+            safe_product = dict(
+                product
+            )
+
+            availability_confirmed = (
+                product.get(
+                    "availability_confirmed"
+                )
+                is True
+            )
+
+            if availability_confirmed:
+
+                try:
+
+                    stock = int(
+                        product.get(
+                            "stock",
+                            0,
+                        )
+                    )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+
+                    stock = 0
+
+                safe_product[
+                    "stock"
+                ] = stock
+
+                safe_product[
+                    "availability_status"
+                ] = (
+                    "in_stock"
+                    if stock > 0
+                    else "out_of_stock"
+                )
+
+            else:
+
+                # Do not let the language model treat
+                # an unverified JSON stock number as live inventory.
+                safe_product.pop(
+                    "stock",
+                    None,
+                )
+
+                safe_product[
+                    "availability_status"
+                ] = "unconfirmed"
+
+            safe_products.append(
+                safe_product
+            )
+
+        return safe_products
 
     @staticmethod
     def _fallback() -> str:

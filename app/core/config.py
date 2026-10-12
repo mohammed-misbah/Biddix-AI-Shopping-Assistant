@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
 
+    MAX_TURNS: int = 10
+
     GEMINI_API_KEY: str
     GEMINI_MODEL: str = "gemini-3.5-flash"
     HARD_TIMEOUT_SECONDS: int = 20

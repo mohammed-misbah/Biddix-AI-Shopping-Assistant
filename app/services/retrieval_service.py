@@ -24,10 +24,6 @@ class RetrievalService:
 
     MIN_SEMANTIC_SCORE = 0.25
 
-    # For explicit inventory questions such as:
-    # "Do you sell German coins?"
-    #
-    # We need stronger evidence than semantic similarity alone.
     STRICT_MIN_LEXICAL_SCORE = 0.03
 
     STOP_WORDS = {
@@ -78,14 +74,18 @@ class RetrievalService:
     def __init__(self) -> None:
 
         if not INDEX_FILE.exists():
+
             raise FileNotFoundError(
-                f"FAISS index not found: {INDEX_FILE}. "
+                f"FAISS index not found: "
+                f"{INDEX_FILE}. "
                 "Run: python -m scripts.index_products"
             )
 
         if not METADATA_FILE.exists():
+
             raise FileNotFoundError(
-                f"Metadata file not found: {METADATA_FILE}. "
+                f"Metadata file not found: "
+                f"{METADATA_FILE}. "
                 "Run: python -m scripts.index_products"
             )
 
@@ -98,18 +98,58 @@ class RetrievalService:
             "r",
             encoding="utf-8",
         ) as file:
-            self.metadata = json.load(file)
+
+            self.metadata = (
+                json.load(file)
+            )
 
         self.products_by_id = {
-            str(product["product_id"]): product
-            for product in product_service.products
+            str(
+                product["product_id"]
+            ): product
+            for product
+            in product_service.products
         }
 
-        if self.index.ntotal != len(self.metadata):
+        if (
+            self.index.ntotal
+            != len(self.metadata)
+        ):
+
             raise RuntimeError(
-                "FAISS index and metadata are out of sync. "
-                "Run the indexing script again."
+                "FAISS index and metadata "
+                "are out of sync."
             )
+
+    # =================================================
+    # Restore exact previous product set
+    # =================================================
+
+    def get_products_by_ids(
+        self,
+        product_ids: list[str],
+    ) -> list[dict[str, Any]]:
+
+        products = []
+
+        for product_id in product_ids:
+
+            product = (
+                self.products_by_id.get(
+                    str(product_id)
+                )
+            )
+
+            if product is not None:
+                products.append(
+                    product
+                )
+
+        return products
+
+    # =================================================
+    # Main retrieval
+    # =================================================
 
     def retrieve(
         self,
@@ -126,22 +166,34 @@ class RetrievalService:
 
         query_lower = query.lower()
 
-        # =================================================
-        # 1. Hard filters
-        # =================================================
+        # -------------------------------------------------
+        # Structured filters
+        # -------------------------------------------------
 
-        year = product_service._extract_year(
-            query_lower
+        year = (
+            product_service
+            ._extract_year(
+                query_lower
+            )
         )
 
         max_price = (
-            product_service._extract_max_price(
+            product_service
+            ._extract_max_price(
+                query_lower
+            )
+        )
+
+        min_price = (
+            product_service
+            ._extract_min_price(
                 query_lower
             )
         )
 
         material = (
-            product_service._extract_material(
+            product_service
+            ._extract_material(
                 query_lower
             )
         )
@@ -155,44 +207,59 @@ class RetrievalService:
             )
         )
 
-        # =================================================
-        # 2. Query embedding
-        # =================================================
+        # -------------------------------------------------
+        # Embedding
+        # -------------------------------------------------
 
         query_vector = (
-            embedding_service.embed_text(
+            embedding_service
+            .embed_text(
                 query
             )
-            .reshape(1, -1)
+            .reshape(
+                1,
+                -1,
+            )
         )
 
-        # Small catalog:
-        # search all products.
         if candidate_limit is None:
-            search_limit = self.index.ntotal
+
+            search_limit = (
+                self.index.ntotal
+            )
+
         else:
+
             search_limit = min(
-                max(candidate_limit, limit),
+                max(
+                    candidate_limit,
+                    limit,
+                ),
                 self.index.ntotal,
             )
 
         if search_limit <= 0:
             return []
 
-        # =================================================
-        # 3. FAISS semantic search
-        # =================================================
+        # -------------------------------------------------
+        # FAISS
+        # -------------------------------------------------
 
-        scores, indexes = self.index.search(
-            query_vector,
-            search_limit,
+        scores, indexes = (
+            self.index.search(
+                query_vector,
+                search_limit,
+            )
         )
 
         candidates: list[
             dict[str, Any]
         ] = []
 
-        for score, index_position in zip(
+        for (
+            score,
+            index_position,
+        ) in zip(
             scores[0],
             indexes[0],
         ):
@@ -200,7 +267,9 @@ class RetrievalService:
             if index_position < 0:
                 continue
 
-            semantic_score = float(score)
+            semantic_score = float(
+                score
+            )
 
             if (
                 semantic_score
@@ -208,48 +277,55 @@ class RetrievalService:
             ):
                 continue
 
-            metadata_item = self.metadata[
+            metadata = self.metadata[
                 index_position
             ]
 
             product_id = str(
-                metadata_item.get(
+                metadata.get(
                     "product_id",
                     "",
                 )
             )
 
-            product = self.products_by_id.get(
-                product_id
+            product = (
+                self.products_by_id.get(
+                    product_id
+                )
             )
 
-            if not product:
+            if product is None:
                 continue
 
             candidates.append({
                 "product": product,
-                "semantic_score": semantic_score,
+                "semantic_score":
+                    semantic_score,
             })
 
-        # =================================================
-        # 4. Apply hard filters
-        # =================================================
+        # -------------------------------------------------
+        # Hard filters
+        # -------------------------------------------------
 
-        filtered_candidates: list[
-            dict[str, Any]
-        ] = []
+        filtered = []
 
         for item in candidates:
 
-            product = item["product"]
+            product = item[
+                "product"
+            ]
 
             # Year
             if year is not None:
 
                 try:
+
                     product_year = int(
-                        product.get("year")
+                        product.get(
+                            "year"
+                        )
                     )
+
                 except (
                     TypeError,
                     ValueError,
@@ -276,34 +352,59 @@ class RetrievalService:
                     continue
 
             # Price
-            if max_price is not None:
+            try:
 
-                try:
-                    price = float(
-                        product.get(
-                            "price",
-                            0,
-                        )
+                price = float(
+                    product.get(
+                        "price",
+                        0,
                     )
-                except (
-                    TypeError,
-                    ValueError,
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            if (
+                max_price is not None
+                and price > max_price
+            ):
+                continue
+
+            if (
+                min_price is not None
+                and price < min_price
+            ):
+                continue
+
+            # -------------------------------------------------
+            # Availability
+            #
+            # Numeric stock alone is not treated as confirmed
+            # availability unless availability_confirmed=True.
+            # -------------------------------------------------
+
+            if wants_in_stock:
+
+                if (
+                    product.get(
+                        "availability_confirmed"
+                    )
+                    is not True
                 ):
                     continue
 
-                if price > max_price:
-                    continue
-
-            # Stock
-            if wants_in_stock:
-
                 try:
+
                     stock = int(
                         product.get(
                             "stock",
                             0,
                         )
                     )
+
                 except (
                     TypeError,
                     ValueError,
@@ -313,13 +414,13 @@ class RetrievalService:
                 if stock <= 0:
                     continue
 
-            filtered_candidates.append(
+            filtered.append(
                 item
             )
 
-        # =================================================
-        # 5. Query keywords
-        # =================================================
+        # -------------------------------------------------
+        # Hybrid ranking
+        # -------------------------------------------------
 
         query_words = (
             self._extract_query_words(
@@ -327,40 +428,34 @@ class RetrievalService:
             )
         )
 
-        # =================================================
-        # 6. Hybrid ranking
-        # =================================================
+        ranked = []
 
-        ranked_candidates: list[
-            dict[str, Any]
-        ] = []
-
-        for item in filtered_candidates:
-
-            product = item["product"]
+        for item in filtered:
 
             lexical_score = (
                 self._calculate_lexical_score(
-                    product=product,
-                    query_words=query_words,
+                    product=item[
+                        "product"
+                    ],
+                    query_words=(
+                        query_words
+                    ),
                 )
             )
 
-            item["lexical_score"] = lexical_score
+            item[
+                "lexical_score"
+            ] = lexical_score
 
-            item["final_score"] = (
-                item["semantic_score"]
+            item[
+                "final_score"
+            ] = (
+                item[
+                    "semantic_score"
+                ]
                 + lexical_score
             )
 
-            # IMPORTANT:
-            #
-            # Explicit catalog existence question:
-            #
-            # "Do you sell German coins?"
-            #
-            # If "German" does not match any catalog
-            # fields, do not return unrelated products.
             if (
                 strict_match
                 and query_words
@@ -369,74 +464,94 @@ class RetrievalService:
             ):
                 continue
 
-            ranked_candidates.append(
+            ranked.append(
                 item
             )
 
-        # =================================================
-        # 7. Sort
-        # =================================================
-
-        ranked_candidates.sort(
+        ranked.sort(
             key=lambda item: (
-                item["final_score"],
-                item["semantic_score"],
+                item[
+                    "final_score"
+                ],
+                item[
+                    "semantic_score"
+                ],
             ),
             reverse=True,
         )
 
-        results = ranked_candidates[
+        results = ranked[
             :limit
         ]
 
-        # =================================================
-        # 8. Development output
-        # =================================================
+        # -------------------------------------------------
+        # Development diagnostics
+        # -------------------------------------------------
 
-        print("\n--- RAG RESULTS ---")
-        print(f"Query: {query}")
-        print(f"Strict match: {strict_match}")
         print(
-            f"Semantic candidates: "
+            "\n--- RAG RESULTS ---"
+        )
+
+        print(
+            f"Query: {query}"
+        )
+
+        print(
+            f"Strict match: "
+            f"{strict_match}"
+        )
+
+        print(
+            f"Candidates: "
             f"{len(candidates)}"
         )
+
         print(
-            f"After filters/ranking: "
-            f"{len(ranked_candidates)}"
+            f"After filters: "
+            f"{len(ranked)}"
         )
-        print()
 
         for item in results:
 
-            product = item["product"]
-
             print(
-                product.get(
+                item[
+                    "product"
+                ].get(
                     "name",
-                    "Unknown Product",
+                    "Unknown",
                 ),
                 "| semantic:",
                 round(
-                    item["semantic_score"],
+                    item[
+                        "semantic_score"
+                    ],
                     3,
                 ),
                 "| lexical:",
                 round(
-                    item["lexical_score"],
+                    item[
+                        "lexical_score"
+                    ],
                     3,
                 ),
                 "| final:",
                 round(
-                    item["final_score"],
+                    item[
+                        "final_score"
+                    ],
                     3,
                 ),
             )
 
-        print("-------------------\n")
+        print(
+            "-------------------\n"
+        )
 
         logger.info(
-            "RAG query=%r strict=%s "
-            "candidates=%d returned=%d",
+            "RAG query=%r "
+            "strict=%s "
+            "candidates=%d "
+            "returned=%d",
             query,
             strict_match,
             len(candidates),
@@ -444,9 +559,15 @@ class RetrievalService:
         )
 
         return [
-            item["product"]
+            item[
+                "product"
+            ]
             for item in results
         ]
+
+    # =================================================
+    # Lexical scoring
+    # =================================================
 
     def _calculate_lexical_score(
         self,
@@ -454,66 +575,95 @@ class RetrievalService:
         query_words: set[str],
     ) -> float:
 
-        name = str(
-            product.get("name", "")
-        ).lower()
-
-        category = str(
-            product.get("category", "")
-        ).lower()
-
-        country = str(
-            product.get("country", "")
-        ).lower()
-
-        region = str(
-            product.get("region", "")
-        ).lower()
-
-        theme = str(
-            product.get("theme", "")
-        ).lower()
-
-        era = str(
-            product.get("era", "")
-        ).lower()
-
-        material = str(
-            product.get("material", "")
-        ).lower()
-
-        description = str(
-            product.get(
-                "description",
-                "",
-            )
-        ).lower()
+        fields = (
+            (
+                str(
+                    product.get(
+                        "name",
+                        "",
+                    )
+                ).lower(),
+                0.08,
+            ),
+            (
+                str(
+                    product.get(
+                        "country",
+                        "",
+                    )
+                ).lower(),
+                0.07,
+            ),
+            (
+                str(
+                    product.get(
+                        "region",
+                        "",
+                    )
+                ).lower(),
+                0.07,
+            ),
+            (
+                str(
+                    product.get(
+                        "category",
+                        "",
+                    )
+                ).lower(),
+                0.06,
+            ),
+            (
+                str(
+                    product.get(
+                        "theme",
+                        "",
+                    )
+                ).lower(),
+                0.06,
+            ),
+            (
+                str(
+                    product.get(
+                        "era",
+                        "",
+                    )
+                ).lower(),
+                0.06,
+            ),
+            (
+                str(
+                    product.get(
+                        "material",
+                        "",
+                    )
+                ).lower(),
+                0.05,
+            ),
+            (
+                str(
+                    product.get(
+                        "description",
+                        "",
+                    )
+                ).lower(),
+                0.03,
+            ),
+        )
 
         score = 0.0
 
         for word in query_words:
 
-            if word in name:
-                score += 0.08
+            for (
+                field_text,
+                weight,
+            ) in fields:
 
-            elif (
-                word in country
-                or word in region
-            ):
-                score += 0.07
+                if word in field_text:
 
-            elif (
-                word in category
-                or word in theme
-                or word in era
-            ):
-                score += 0.06
+                    score += weight
 
-            elif word in material:
-                score += 0.05
-
-            elif word in description:
-                score += 0.03
+                    break
 
         return min(
             score,
