@@ -1,6 +1,9 @@
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
+
+import redis
 
 from app.core.config import settings
 
@@ -134,10 +137,26 @@ class ConversationService:
 
     def __init__(self) -> None:
 
-        self.sessions: dict[
-            str,
-            ConversationSession,
-        ] = {}
+        # -------------------------------------------------
+        # ONLY STORAGE CHANGE:
+        #
+        # OLD:
+        # self.sessions = {}
+        #
+        # NEW:
+        # Redis / Memurai
+        # -------------------------------------------------
+
+        self.redis = redis.Redis(
+            host=settings.REDIS_HOST,
+            port=settings.REDIS_PORT,
+            db=settings.REDIS_DB,
+            decode_responses=True,
+        )
+
+        self.session_ttl_seconds = (
+            settings.SESSION_TTL_SECONDS
+        )
 
     # =================================================
     # SESSION
@@ -148,19 +167,62 @@ class ConversationService:
         session_id: str,
     ) -> ConversationSession:
 
-        session = self.sessions.get(
+        key = self._session_key(
             session_id
         )
 
-        if session is None:
+        raw = self.redis.get(
+            key
+        )
 
-            session = ConversationSession()
+        if raw is None:
 
-            self.sessions[
-                session_id
-            ] = session
+            return ConversationSession()
 
-        return session
+        try:
+
+            data = json.loads(
+                raw
+            )
+
+            return self._deserialize_session(
+                data
+            )
+
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            KeyError,
+        ):
+
+            # If stored session data is invalid,
+            # use a clean session instead of breaking
+            # the chat request.
+            return ConversationSession()
+
+    def _save_session(
+        self,
+        session_id: str,
+        session: ConversationSession,
+    ) -> None:
+
+        key = self._session_key(
+            session_id
+        )
+
+        data = self._serialize_session(
+            session
+        )
+
+        self.redis.set(
+            key,
+            json.dumps(
+                data,
+                ensure_ascii=False,
+            ),
+            ex=self.session_ttl_seconds,
+        )
 
     # =================================================
     # HISTORY
@@ -257,6 +319,11 @@ class ConversationService:
             session
         )
 
+        self._save_session(
+            session_id,
+            session,
+        )
+
     def set_selected_products(
         self,
         session_id: str,
@@ -289,6 +356,11 @@ class ConversationService:
 
         self._touch(
             session
+        )
+
+        self._save_session(
+            session_id,
+            session,
         )
 
     def set_focused_product(
@@ -328,6 +400,11 @@ class ConversationService:
             session
         )
 
+        self._save_session(
+            session_id,
+            session,
+        )
+
     def clear_selection(
         self,
         session_id: str,
@@ -342,6 +419,11 @@ class ConversationService:
 
         self._touch(
             session
+        )
+
+        self._save_session(
+            session_id,
+            session,
         )
 
     # =================================================
@@ -428,6 +510,11 @@ class ConversationService:
             session
         )
 
+        self._save_session(
+            session_id,
+            session,
+        )
+
     # =================================================
     # MESSAGES
     # =================================================
@@ -460,6 +547,11 @@ class ConversationService:
             session
         )
 
+        self._save_session(
+            session_id,
+            session,
+        )
+
     def add_assistant_message(
         self,
         session_id: str,
@@ -484,6 +576,307 @@ class ConversationService:
         self._touch(
             session
         )
+
+        self._save_session(
+            session_id,
+            session,
+        )
+
+    # =================================================
+    # REDIS SERIALIZATION
+    # =================================================
+
+    @staticmethod
+    def _serialize_session(
+        session: ConversationSession,
+    ) -> dict:
+
+        return {
+            "turns": [
+                {
+                    "role": turn.role,
+                    "content": turn.content,
+                }
+                for turn in session.turns
+            ],
+
+            "last_mode":
+                session.last_mode,
+
+            "last_result_product_ids":
+                session.last_result_product_ids,
+
+            "selected_product_ids":
+                session.selected_product_ids,
+
+            "focused_product_id":
+                session.focused_product_id,
+
+            "active_filters": {
+                "year":
+                    session.active_filters.year,
+
+                "min_price":
+                    session.active_filters.min_price,
+
+                "min_price_inclusive":
+                    (
+                        session
+                        .active_filters
+                        .min_price_inclusive
+                    ),
+
+                "max_price":
+                    session.active_filters.max_price,
+
+                "max_price_inclusive":
+                    (
+                        session
+                        .active_filters
+                        .max_price_inclusive
+                    ),
+
+                "material":
+                    session.active_filters.material,
+
+                "in_stock":
+                    session.active_filters.in_stock,
+
+                "facets": {
+                    key: list(values)
+                    for key, values
+                    in (
+                        session
+                        .active_filters
+                        .facets
+                        .items()
+                    )
+                },
+            },
+
+            "semantic_query":
+                session.semantic_query,
+
+            "updated_at":
+                session.updated_at.isoformat(),
+        }
+
+    @staticmethod
+    def _deserialize_session(
+        data: dict,
+    ) -> ConversationSession:
+
+        raw_filters = data.get(
+            "active_filters",
+            {},
+        )
+
+        filters = CatalogFilters(
+            year=raw_filters.get(
+                "year"
+            ),
+
+            min_price=raw_filters.get(
+                "min_price"
+            ),
+
+            min_price_inclusive=(
+                raw_filters.get(
+                    "min_price_inclusive",
+                    False,
+                )
+            ),
+
+            max_price=raw_filters.get(
+                "max_price"
+            ),
+
+            max_price_inclusive=(
+                raw_filters.get(
+                    "max_price_inclusive",
+                    True,
+                )
+            ),
+
+            material=raw_filters.get(
+                "material"
+            ),
+
+            in_stock=raw_filters.get(
+                "in_stock",
+                False,
+            ),
+
+            facets={
+                key: set(values)
+                for key, values
+                in raw_filters.get(
+                    "facets",
+                    {},
+                ).items()
+            },
+        )
+
+        turns = [
+            ConversationTurn(
+                role=turn["role"],
+                content=turn["content"],
+            )
+            for turn in data.get(
+                "turns",
+                [],
+            )
+            if (
+                isinstance(
+                    turn,
+                    dict,
+                )
+                and turn.get(
+                    "role"
+                )
+                in {
+                    "user",
+                    "assistant",
+                }
+                and isinstance(
+                    turn.get(
+                        "content"
+                    ),
+                    str,
+                )
+            )
+        ]
+
+        updated_at_raw = data.get(
+            "updated_at"
+        )
+
+        if isinstance(
+            updated_at_raw,
+            str,
+        ):
+
+            try:
+
+                updated_at = (
+                    datetime.fromisoformat(
+                        updated_at_raw
+                    )
+                )
+
+            except ValueError:
+
+                updated_at = datetime.now(
+                    timezone.utc
+                )
+
+        else:
+
+            updated_at = datetime.now(
+                timezone.utc
+            )
+
+        return ConversationSession(
+            turns=turns,
+
+            last_mode=data.get(
+                "last_mode"
+            ),
+
+            last_result_product_ids=list(
+                data.get(
+                    "last_result_product_ids",
+                    [],
+                )
+            ),
+
+            selected_product_ids=list(
+                data.get(
+                    "selected_product_ids",
+                    [],
+                )
+            ),
+
+            focused_product_id=data.get(
+                "focused_product_id"
+            ),
+
+            active_filters=filters,
+
+            semantic_query=data.get(
+                "semantic_query",
+                "",
+            ),
+
+            updated_at=updated_at,
+        )
+
+    # =================================================
+    # REDIS HELPERS
+    # =================================================
+
+    @staticmethod
+    def _session_key(
+        session_id: str,
+    ) -> str:
+
+        return (
+            f"biddix:session:"
+            f"{session_id}"
+        )
+
+    def session_exists(
+        self,
+        session_id: str,
+    ) -> bool:
+
+        return bool(
+            self.redis.exists(
+                self._session_key(
+                    session_id
+                )
+            )
+        )
+
+    def get_session_ttl(
+        self,
+        session_id: str,
+    ) -> int:
+
+        return int(
+            self.redis.ttl(
+                self._session_key(
+                    session_id
+                )
+            )
+        )
+
+    def delete_session(
+        self,
+        session_id: str,
+    ) -> bool:
+
+        return bool(
+            self.redis.delete(
+                self._session_key(
+                    session_id
+                )
+            )
+        )
+
+    def ping(
+        self,
+    ) -> bool:
+
+        return bool(
+            self.redis.ping()
+        )
+
+    def close(
+        self,
+    ) -> None:
+
+        self.redis.close()
 
     # =================================================
     # INTERNAL

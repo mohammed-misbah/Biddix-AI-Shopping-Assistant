@@ -22,6 +22,14 @@ class Settings(BaseSettings):
 
     MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
 
+    # Redis / Memurai
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+
+    # 24 hours
+    SESSION_TTL_SECONDS: int = 86400
+
     SHOPIFY_STORE_DOMAIN: str = ""
 
     model_config = SettingsConfigDict(
