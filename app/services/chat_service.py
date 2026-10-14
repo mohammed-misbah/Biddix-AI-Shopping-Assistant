@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 import uuid
 from typing import Any
 
@@ -27,12 +28,36 @@ class ChatService:
         self,
         message: str,
         session_id: str | None = None,
+        request_id: str | None = None,
     ):
+
+        # =================================================
+        # SESSION
+        # =================================================
 
         if not session_id:
             session_id = str(
                 uuid.uuid4()
             )
+
+        # =================================================
+        # OBSERVABILITY / TIMING
+        #
+        # These values are ONLY for logs.
+        # They do not affect chat behaviour.
+        # =================================================
+
+        request_id = (
+            request_id
+            or "unknown"
+        )
+
+        chat_start_time = (
+            time.perf_counter()
+        )
+
+        retrieval_ms = 0.0
+        gemini_ms = 0.0
 
         # =================================================
         # EXISTING CONVERSATION STATE
@@ -170,11 +195,23 @@ class ChatService:
                 selection_limit=1,
             )
 
+        # =================================================
+        # ROUTE LOG
+        #
+        # Added request_id + session_id.
+        # Chat behaviour is unchanged.
+        # =================================================
+
         logger.info(
-            "Chat route mode=%s "
-            "follow_up=%s "
-            "type=%s "
+            "CHAT ROUTE | "
+            "request_id=%s | "
+            "session_id=%s | "
+            "mode=%s | "
+            "follow_up=%s | "
+            "follow_up_type=%s | "
             "action=%s",
+            request_id,
+            session_id,
             route.mode,
             route.is_follow_up,
             route.follow_up_type,
@@ -293,6 +330,14 @@ class ChatService:
                 )
             )
 
+            # =============================================
+            # START RETRIEVAL TIMER
+            # =============================================
+
+            retrieval_start = (
+                time.perf_counter()
+            )
+
             products = (
                 retrieval_service
                 .retrieve(
@@ -305,6 +350,18 @@ class ChatService:
                     ),
                 )
             )
+
+            retrieval_ms = (
+                (
+                    time.perf_counter()
+                    - retrieval_start
+                )
+                * 1000
+            )
+
+            # =============================================
+            # END RETRIEVAL TIMER
+            # =============================================
 
             conversation_service.set_search_state(
                 session_id=session_id,
@@ -334,6 +391,14 @@ class ChatService:
                 )
             )
 
+            # =============================================
+            # START RETRIEVAL TIMER
+            # =============================================
+
+            retrieval_start = (
+                time.perf_counter()
+            )
+
             products = (
                 retrieval_service
                 .retrieve(
@@ -346,6 +411,18 @@ class ChatService:
                     ),
                 )
             )
+
+            retrieval_ms = (
+                (
+                    time.perf_counter()
+                    - retrieval_start
+                )
+                * 1000
+            )
+
+            # =============================================
+            # END RETRIEVAL TIMER
+            # =============================================
 
             conversation_service.set_search_state(
                 session_id=session_id,
@@ -413,7 +490,14 @@ class ChatService:
 
         # =================================================
         # LLM
+        #
+        # Only timing was added here.
+        # Gemini input/output behaviour is unchanged.
         # =================================================
+
+        gemini_start = (
+            time.perf_counter()
+        )
 
         answer = (
             await llm_service
@@ -428,6 +512,54 @@ class ChatService:
                     route.response_style
                 ),
             )
+        )
+
+        gemini_ms = (
+            (
+                time.perf_counter()
+                - gemini_start
+            )
+            * 1000
+        )
+
+        # =================================================
+        # CHAT TOTAL TIME
+        # =================================================
+
+        chat_total_ms = (
+            (
+                time.perf_counter()
+                - chat_start_time
+            )
+            * 1000
+        )
+
+        # =================================================
+        # STRUCTURED CHAT METRICS LOG
+        # =================================================
+
+        logger.info(
+            "CHAT METRICS | "
+            "request_id=%s | "
+            "session_id=%s | "
+            "mode=%s | "
+            "follow_up=%s | "
+            "follow_up_type=%s | "
+            "action=%s | "
+            "products=%s | "
+            "retrieval_ms=%.2f | "
+            "gemini_ms=%.2f | "
+            "chat_total_ms=%.2f",
+            request_id,
+            session_id,
+            route.mode,
+            route.is_follow_up,
+            route.follow_up_type,
+            route.product_action,
+            len(products),
+            retrieval_ms,
+            gemini_ms,
+            chat_total_ms,
         )
 
         conversation_service.add_assistant_message(
