@@ -74,7 +74,21 @@ async function sendMessage({message,sessionId,currentProduct,onChunk,signal}){
 // app.js
 let root=document.querySelector('#biddix-app');
 if(!root){root=document.createElement('div');root.id='biddix-app';document.body.append(root);}
-const state={status:'closed',sessionId:null,messages:[],currentProduct:null,recommendedProducts:[],lastQuery:'',open:false};
+const SESSION_STORAGE_KEY = 'biddix_session_id';
+
+const state={
+    status:'closed',
+
+    sessionId:localStorage.getItem(
+        SESSION_STORAGE_KEY
+    ),
+
+    messages:[],
+    currentProduct:null,
+    recommendedProducts:[],
+    lastQuery:'',
+    open:false
+};
 let returnFocus,openingTimer,previousOverflow;
 let backgroundElements=[];
 root.innerHTML=`<button class="bx-trigger" data-action="open" aria-controls="concierge" aria-expanded="false"><span class="bx-trigger-mark">B.</span><span><strong>Biddix</strong><small>Product Concierge</small></span><span class="bx-live-dot" aria-hidden="true"></span></button><div class="bx-backdrop" hidden></div><aside id="concierge" class="bx-panel" role="dialog" aria-modal="true" aria-labelledby="concierge-title" aria-hidden="true" inert><header class="bx-panel-header"><div><strong id="concierge-title">Biddix</strong><span>Product Concierge</span></div><div class="bx-panel-controls"><button data-action="minimize" aria-label="Minimize concierge">−</button><button data-action="close" aria-label="Close concierge">×</button></div></header><div class="bx-panel-status"><span><i></i> Personal guidance</span><span>Sample collection</span></div><div id="product-context"></div><div class="bx-feed" id="feed" role="log" aria-label="Conversation" aria-live="polite"></div><div class="bx-composer-wrap"><button class="bx-start-over" data-action="reset" hidden>Start a new enquiry ↗</button><form class="bx-composer"><label class="bx-sr" for="message">Ask about the Biddix collection</label><textarea id="message" rows="1" placeholder="Ask about the Biddix collection…" maxlength="2000"></textarea><button type="submit" aria-label="Send message">↑</button></form><div class="bx-composer-note"><span>Considered answers. Exceptional finds.</span><button data-action="demo" aria-label="Open prototype state controls">Demo ↗</button></div><div class="bx-demo-controls" hidden><span>Preview a state</span><button data-query="Find silver under AED 50">Empty results</button><button data-query="Simulate error">Error & retry</button></div></div></aside>`;
@@ -84,7 +98,16 @@ function open(){if(state.open)return;returnFocus=document.activeElement;state.op
 while(branch.parentElement&&branch!==document.body){for(const el of branch.parentElement.children){if(el!==branch&&!['SCRIPT','STYLE','LINK'].includes(el.tagName)){backgroundElements.push([el,el.inert]);el.inert=true;}}branch=branch.parentElement;}
 previousOverflow=document.body.style.overflow;document.body.style.overflow='hidden';root.querySelector('.bx-trigger').hidden=true;render();openingTimer=setTimeout(()=>{if(state.status==='opening')state.status='ready';input.focus();},320);}
 function close(){clearTimeout(openingTimer);state.open=false;panel.classList.remove('is-open');panel.setAttribute('aria-hidden','true');panel.inert=true;root.querySelector('.bx-backdrop').hidden=true;root.querySelector('.bx-trigger').setAttribute('aria-expanded','false');for(const [el,wasInert] of backgroundElements)el.inert=wasInert;backgroundElements=[];document.body.style.overflow=previousOverflow||'';root.querySelector('.bx-trigger').hidden=false;if(state.status==='ready'||state.status==='opening')state.status='closed';(returnFocus&&returnFocus!==document.body?returnFocus:root.querySelector('.bx-trigger')).focus();}
-async function submit(text,{retry=false}={}){text=text.trim();if(!text||['sending','streaming'].includes(state.status))return;open();state.lastQuery=text;if(!retry)state.messages.push({role:'user',text});input.value='';state.status='sending';render();try{const data=await sendMessage({message:text,sessionId:state.sessionId,currentProduct:state.currentProduct,onChunk:()=>{state.status='streaming';}});state.sessionId=data.session_id;state.recommendedProducts=data.products||[];state.messages.push({role:'assistant',...data});state.status=state.open?'ready':'closed';}catch{state.status='error';}render();if(state.open)input.focus();}
+async function submit(text,{retry=false}={}){text=text.trim();if(!text||['sending','streaming'].includes(state.status))return;open();state.lastQuery=text;if(!retry)state.messages.push({role:'user',text});input.value='';state.status='sending';render();try{const data=await sendMessage({message:text,sessionId:state.sessionId,currentProduct:state.currentProduct,onChunk:()=>{state.status='streaming';}});
+state.sessionId=data.session_id;
+
+if(state.sessionId){
+    localStorage.setItem(
+        SESSION_STORAGE_KEY,
+        state.sessionId
+    );
+}
+state.recommendedProducts=data.products||[];state.messages.push({role:'assistant',...data});state.status=state.open?'ready':'closed';}catch{state.status='error';}render();if(state.open)input.focus();}
 function product(id){
  const p=state.recommendedProducts.find(p=>p.id===id)||getProduct(id);if(!p)return;
  state.currentProduct=p;
@@ -93,7 +116,22 @@ function product(id){
  }
  render();submit(`Show me the specifications for ${p.name}`);
 }
-root.addEventListener('click',e=>{const b=e.target.closest('button,a');if(!b)return;if(b.dataset.query){submit(b.dataset.query);return;}if(b.dataset.product){product(b.dataset.product);return;}if(b.dataset.feedback){b.closest('.bx-feedback').textContent=b.dataset.feedback==='Yes'?'Thank you. Your feedback is noted.':'Thank you. Try adding a little more detail to your enquiry.';return;}switch(b.dataset.action){case'open':open();break;case'close':case'minimize':close();break;case'reset':state.messages=[];state.sessionId=null;state.status='ready';render();input.focus();break;case'clear-context':state.currentProduct=null;render();break;case'retry':submit(state.lastQuery==='Simulate error'?'Explore UAE coins':state.lastQuery,{retry:true});break;case'demo':{const el=root.querySelector('.bx-demo-controls');el.hidden=!el.hidden;break;}}});
+root.addEventListener('click',e=>{const b=e.target.closest('button,a');if(!b)return;if(b.dataset.query){submit(b.dataset.query);return;}if(b.dataset.product){product(b.dataset.product);return;}if(b.dataset.feedback){b.closest('.bx-feedback').textContent=b.dataset.feedback==='Yes'?'Thank you. Your feedback is noted.':'Thank you. Try adding a little more detail to your enquiry.';return;}switch(b.dataset.action){case'open':open();break;case'close':case'minimize':close();break;
+case'reset':
+    state.messages=[];
+    state.sessionId=null;
+    state.currentProduct=null;
+    state.recommendedProducts=[];
+
+    localStorage.removeItem(
+        SESSION_STORAGE_KEY
+    );
+
+    state.status='ready';
+    render();
+    input.focus();
+    break;
+case'clear-context':state.currentProduct=null;render();break;case'retry':submit(state.lastQuery==='Simulate error'?'Explore UAE coins':state.lastQuery,{retry:true});break;case'demo':{const el=root.querySelector('.bx-demo-controls');el.hidden=!el.hidden;break;}}});
 composer.addEventListener('submit',e=>{e.preventDefault();submit(input.value);});input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit(input.value);}});root.querySelector('.bx-backdrop').addEventListener('click',close);document.addEventListener('keydown',e=>{if(!state.open)return;if(e.key==='Escape'){e.preventDefault();close();}if(e.key==='Tab'){const els=[...panel.querySelectorAll('button,textarea,a')].filter(el=>!el.disabled&&el.getClientRects().length);const first=els[0],last=els.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}});
 // Shopify can set BIDDIX_CONFIG.currentProductId or dispatch biddix:product-context.
 state.currentProduct=window.BIDDIX_CONFIG?.currentProduct||getProduct(window.BIDDIX_CONFIG?.currentProductId)||null;
