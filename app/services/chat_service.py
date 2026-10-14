@@ -10,6 +10,7 @@ from app.services.llm_service import (
     llm_service,
 )
 from app.services.query_router import (
+    QueryRoute,
     query_router,
 )
 from app.services.retrieval_service import (
@@ -34,7 +35,7 @@ class ChatService:
             )
 
         # =================================================
-        # Existing state
+        # EXISTING CONVERSATION STATE
         # =================================================
 
         previous_mode = (
@@ -87,13 +88,87 @@ class ChatService:
         )
 
         # =================================================
-        # Route current message
+        # ROUTE CURRENT MESSAGE
         # =================================================
 
         route = query_router.route(
             message=message,
             previous_mode=previous_mode,
         )
+
+        # =================================================
+        # NAMED PRODUCT FROM PREVIOUS RESULTS
+        #
+        # Example:
+        #
+        # Find silver under AED 500
+        #
+        # then:
+        #
+        # Tell me more about Lunar Dragon
+        #
+        # Resolve Lunar Dragon from the previous result set
+        # BEFORE doing another FAISS search.
+        #
+        # Nothing is hard-coded.
+        # =================================================
+
+        named_previous_products: list[
+            dict[str, Any]
+        ] = []
+
+        if (
+            previous_mode
+            in (
+                "catalog",
+                "mixed",
+            )
+            and last_result_ids
+            and self._looks_like_named_product_follow_up(
+                message
+            )
+        ):
+
+            previous_products = (
+                retrieval_service
+                .get_products_by_ids(
+                    last_result_ids
+                )
+            )
+
+            named_previous_products = (
+                self._match_named_product_reference(
+                    message=message,
+                    products=previous_products,
+                )
+            )
+
+        # ---------------------------------------------
+        # Named previous product overrides generic
+        # knowledge/search routing.
+        # ---------------------------------------------
+
+        if named_previous_products:
+
+            route = QueryRoute(
+                mode=(
+                    previous_mode
+                    or "catalog"
+                ),
+                is_follow_up=True,
+                follow_up_type="reuse_results",
+                product_action=(
+                    "availability"
+                    if self._contains_availability_request(
+                        message
+                    )
+                    else "detail"
+                ),
+                response_style=(
+                    route.response_style
+                ),
+                selection_limit=1,
+            )
 
         logger.info(
             "Chat route mode=%s "
@@ -111,7 +186,7 @@ class ChatService:
         ] = []
 
         # =================================================
-        # Knowledge mode
+        # KNOWLEDGE MODE
         # =================================================
 
         if route.mode == "knowledge":
@@ -119,152 +194,168 @@ class ChatService:
             products = []
 
         # =================================================
-        # Catalog / mixed
+        # NAMED PREVIOUS PRODUCT
+        # =================================================
+
+        elif named_previous_products:
+
+            products = (
+                named_previous_products
+            )
+
+            conversation_service.set_focused_product(
+                session_id=session_id,
+                product=products[0],
+            )
+
+        # =================================================
+        # REUSE FOCUSED PRODUCT
+        # =================================================
+
+        elif (
+            route.follow_up_type
+            == "reuse_focus"
+        ):
+
+            products = (
+                retrieval_service
+                .get_products_by_ids(
+                    [focused_id]
+                )
+                if focused_id
+                else []
+            )
+
+        # =================================================
+        # REUSE SELECTED PRODUCTS
+        # =================================================
+
+        elif (
+            route.follow_up_type
+            == "reuse_selection"
+        ):
+
+            products = (
+                retrieval_service
+                .get_products_by_ids(
+                    selected_ids
+                )
+                if selected_ids
+                else []
+            )
+
+        # =================================================
+        # REUSE LAST FULL RESULT SET
+        # =================================================
+
+        elif (
+            route.follow_up_type
+            == "reuse_results"
+        ):
+
+            products = (
+                retrieval_service
+                .get_products_by_ids(
+                    last_result_ids
+                )
+                if last_result_ids
+                else []
+            )
+
+        # =================================================
+        # REFINE OLD SEARCH
+        #
+        # Only short refinement messages arrive here.
+        #
+        # Example:
+        # "Only silver ones."
+        # =================================================
+
+        elif (
+            route.follow_up_type
+            == "refine_search"
+        ):
+
+            new_filters = (
+                retrieval_service
+                .extract_filters(
+                    query=message,
+                    base_filters=(
+                        active_filters
+                    ),
+                )
+            )
+
+            semantic_query = (
+                self._merge_semantic_query(
+                    previous_semantic_query,
+                    message,
+                )
+            )
+
+            products = (
+                retrieval_service
+                .retrieve(
+                    query=semantic_query,
+                    filters=new_filters,
+                    limit=5,
+                    strict_match=(
+                        route
+                        .strict_catalog_match
+                    ),
+                )
+            )
+
+            conversation_service.set_search_state(
+                session_id=session_id,
+                products=products,
+                filters=new_filters,
+                semantic_query=(
+                    semantic_query
+                ),
+            )
+
+        # =================================================
+        # FRESH SEARCH
+        #
+        # IMPORTANT:
+        # old active_filters are NOT passed here.
+        #
+        # "Find silver under AED 500"
+        # therefore cannot inherit an old gold/>500 search.
         # =================================================
 
         else:
 
-            # ---------------------------------------------
-            # Reuse focused product
-            # ---------------------------------------------
-
-            if (
-                route.follow_up_type
-                == "reuse_focus"
-            ):
-
-                if focused_id:
-
-                    products = (
-                        retrieval_service
-                        .get_products_by_ids(
-                            [focused_id]
-                        )
-                    )
-
-                else:
-
-                    products = []
-
-            # ---------------------------------------------
-            # Reuse selected products
-            # ---------------------------------------------
-
-            elif (
-                route.follow_up_type
-                == "reuse_selection"
-            ):
-
-                products = (
-                    retrieval_service
-                    .get_products_by_ids(
-                        selected_ids
-                    )
-                    if selected_ids
-                    else []
+            filters = (
+                retrieval_service
+                .extract_filters(
+                    query=message
                 )
+            )
 
-            # ---------------------------------------------
-            # Reuse last full result set
-            # ---------------------------------------------
-
-            elif (
-                route.follow_up_type
-                == "reuse_results"
-            ):
-
-                products = (
-                    retrieval_service
-                    .get_products_by_ids(
-                        last_result_ids
-                    )
-                    if last_result_ids
-                    else []
-                )
-
-            # ---------------------------------------------
-            # Refine existing search
-            # ---------------------------------------------
-
-            elif (
-                route.follow_up_type
-                == "refine_search"
-            ):
-
-                new_filters = (
-                    retrieval_service
-                    .extract_filters(
-                        query=message,
-                        base_filters=(
-                            active_filters
-                        ),
-                    )
-                )
-
-                semantic_query = (
-                    self._merge_semantic_query(
-                        previous_semantic_query,
-                        message,
-                    )
-                )
-
-                products = (
-                    retrieval_service
-                    .retrieve(
-                        query=semantic_query,
-                        filters=new_filters,
-                        limit=5,
-                        strict_match=(
-                            route
-                            .strict_catalog_match
-                        ),
-                    )
-                )
-
-                conversation_service.set_search_state(
-                    session_id=session_id,
-                    products=products,
-                    filters=new_filters,
-                    semantic_query=(
-                        semantic_query
+            products = (
+                retrieval_service
+                .retrieve(
+                    query=message,
+                    filters=filters,
+                    limit=5,
+                    strict_match=(
+                        route
+                        .strict_catalog_match
                     ),
                 )
+            )
 
-            # ---------------------------------------------
-            # Fresh search
-            # ---------------------------------------------
-
-            else:
-
-                filters = (
-                    retrieval_service
-                    .extract_filters(
-                        query=message
-                    )
-                )
-
-                products = (
-                    retrieval_service
-                    .retrieve(
-                        query=message,
-                        filters=filters,
-                        limit=5,
-                        strict_match=(
-                            route
-                            .strict_catalog_match
-                        ),
-                    )
-                )
-
-                conversation_service.set_search_state(
-                    session_id=session_id,
-                    products=products,
-                    filters=filters,
-                    semantic_query=message,
-                )
+            conversation_service.set_search_state(
+                session_id=session_id,
+                products=products,
+                filters=filters,
+                semantic_query=message,
+            )
 
         # =================================================
-        # Deterministic product-reference resolution
+        # DETERMINISTIC PRODUCT ACTIONS
         # =================================================
 
         if (
@@ -305,7 +396,7 @@ class ChatService:
                 )
 
         # =================================================
-        # Conversation history
+        # HISTORY
         # =================================================
 
         conversation_history = (
@@ -321,19 +412,22 @@ class ChatService:
         )
 
         # =================================================
-        # Generate response
+        # LLM
         # =================================================
 
-        answer = await llm_service.generate_response(
-            user_message=message,
-            products=products,
-            mode=route.mode,
-            conversation_history=(
-                conversation_history
-            ),
-            response_style=(
-                route.response_style
-            ),
+        answer = (
+            await llm_service
+            .generate_response(
+                user_message=message,
+                products=products,
+                mode=route.mode,
+                conversation_history=(
+                    conversation_history
+                ),
+                response_style=(
+                    route.response_style
+                ),
+            )
         )
 
         conversation_service.add_assistant_message(
@@ -342,7 +436,7 @@ class ChatService:
         )
 
         # =================================================
-        # Knowledge responses have no cards
+        # KNOWLEDGE MODE NEVER RETURNS PRODUCT CARDS
         # =================================================
 
         if route.mode == "knowledge":
@@ -353,6 +447,10 @@ class ChatService:
                 "products": [],
             }
 
+        # =================================================
+        # ORDER CARDS TO MATCH ANSWER
+        # =================================================
+
         ordered_products = (
             self._order_products_by_answer(
                 products=products,
@@ -361,7 +459,7 @@ class ChatService:
         )
 
         # =================================================
-        # Choose one/two
+        # CHOOSE ONE / TWO
         # =================================================
 
         if (
@@ -375,9 +473,56 @@ class ChatService:
                 self._products_mentioned_in_answer(
                     products=ordered_products,
                     answer=answer,
-                    limit=route.selection_limit,
+                    limit=(
+                        route.selection_limit
+                    ),
                 )
             )
+
+            # If Gemini fails to repeat enough exact names,
+            # fill deterministically from the supplied order.
+            if (
+                len(selected_products)
+                < route.selection_limit
+            ):
+
+                already_selected = {
+                    str(
+                        product.get(
+                            "product_id"
+                        )
+                    )
+                    for product
+                    in selected_products
+                }
+
+                for product in ordered_products:
+
+                    product_id = str(
+                        product.get(
+                            "product_id"
+                        )
+                    )
+
+                    if (
+                        product_id
+                        in already_selected
+                    ):
+                        continue
+
+                    selected_products.append(
+                        product
+                    )
+
+                    already_selected.add(
+                        product_id
+                    )
+
+                    if (
+                        len(selected_products)
+                        >= route.selection_limit
+                    ):
+                        break
 
             conversation_service.set_selected_products(
                 session_id=session_id,
@@ -391,12 +536,18 @@ class ChatService:
 
                 conversation_service.set_focused_product(
                     session_id=session_id,
-                    product=selected_products[0],
+                    product=(
+                        selected_products[0]
+                    ),
                 )
 
             ordered_products = (
                 selected_products
             )
+
+        # =================================================
+        # API RESPONSE
+        # =================================================
 
         return {
             "answer": answer,
@@ -411,7 +562,409 @@ class ChatService:
         }
 
     # =====================================================
-    # Resolve references
+    # DOES THIS LOOK LIKE A NAMED-PRODUCT FOLLOW-UP?
+    # =====================================================
+
+    @staticmethod
+    def _looks_like_named_product_follow_up(
+        message: str,
+    ) -> bool:
+
+        text = " ".join(
+            re.findall(
+                r"[a-z0-9]+",
+                message.lower(),
+            )
+        )
+
+        if not text:
+            return False
+
+        follow_up_phrases = (
+            "learn more",
+            "tell me more",
+            "tell me about",
+            "more details",
+            "more detail",
+            "more information",
+            "details about",
+            "details on",
+            "information about",
+            "information on",
+            "what about",
+            "how about",
+            "price",
+            "cost",
+            "purity",
+            "weight",
+            "material",
+            "year",
+            "in stock",
+            "out of stock",
+            "available",
+            "availability",
+        )
+
+        if any(
+            phrase in text
+            for phrase
+            in follow_up_phrases
+        ):
+            return True
+
+        # Direct short name:
+        #
+        # "Lunar Dragon?"
+        #
+        # Matching still has to be unique.
+        return (
+            len(
+                text.split()
+            )
+            <= 6
+        )
+
+    # =====================================================
+    # MATCH A PRODUCT NAME INSIDE PREVIOUS RESULTS
+    # =====================================================
+
+    @classmethod
+    def _match_named_product_reference(
+        cls,
+        message: str,
+        products: list[
+            dict[str, Any]
+        ],
+    ) -> list[
+        dict[str, Any]
+    ]:
+
+        if not products:
+            return []
+
+        message_tokens = (
+            cls._reference_tokens(
+                message
+            )
+        )
+
+        if not message_tokens:
+            return []
+
+        message_set = set(
+            message_tokens
+        )
+
+        normalized_message = (
+            " ".join(
+                message_tokens
+            )
+        )
+
+        generic_name_tokens = {
+            "coin",
+            "coins",
+            "product",
+            "products",
+            "collectible",
+            "collectibles",
+            "edition",
+            "piece",
+        }
+
+        prepared: list[
+            tuple[
+                dict[str, Any],
+                list[str],
+                list[str],
+            ]
+        ] = []
+
+        token_frequency: dict[
+            str,
+            int,
+        ] = {}
+
+        # ---------------------------------------------
+        # Prepare product names
+        # ---------------------------------------------
+
+        for product in products:
+
+            name = str(
+                product.get(
+                    "name",
+                    "",
+                )
+            ).strip()
+
+            if not name:
+                continue
+
+            name_tokens = (
+                cls._reference_tokens(
+                    name
+                )
+            )
+
+            significant = [
+                token
+                for token
+                in name_tokens
+                if (
+                    token
+                    not in generic_name_tokens
+                    and not token.isdigit()
+                )
+            ]
+
+            if not significant:
+                continue
+
+            prepared.append(
+                (
+                    product,
+                    name_tokens,
+                    significant,
+                )
+            )
+
+            for token in set(
+                significant
+            ):
+
+                token_frequency[
+                    token
+                ] = (
+                    token_frequency.get(
+                        token,
+                        0,
+                    )
+                    + 1
+                )
+
+        candidates: list[
+            tuple[
+                float,
+                dict[str, Any],
+            ]
+        ] = []
+
+        # ---------------------------------------------
+        # Score possible product references
+        # ---------------------------------------------
+
+        for (
+            product,
+            name_tokens,
+            significant,
+        ) in prepared:
+
+            normalized_name = (
+                " ".join(
+                    name_tokens
+                )
+            )
+
+            # Full name in message.
+            if (
+                normalized_name
+                and normalized_name
+                in normalized_message
+            ):
+
+                candidates.append(
+                    (
+                        10000.0,
+                        product,
+                    )
+                )
+
+                continue
+
+            overlap = (
+                set(
+                    significant
+                )
+                & message_set
+            )
+
+            overlap_count = len(
+                overlap
+            )
+
+            if overlap_count == 0:
+                continue
+
+            # Two name words:
+            #
+            # Lunar + Dragon
+            strong_match = (
+                overlap_count >= 2
+            )
+
+            # One distinctive word is allowed only when
+            # it belongs to exactly one previous result.
+            single_unique_match = False
+
+            if overlap_count == 1:
+
+                token = next(
+                    iter(
+                        overlap
+                    )
+                )
+
+                single_unique_match = (
+                    len(token) >= 5
+                    and token_frequency.get(
+                        token,
+                        0,
+                    )
+                    == 1
+                )
+
+            if not (
+                strong_match
+                or single_unique_match
+            ):
+                continue
+
+            coverage = (
+                overlap_count
+                / max(
+                    len(
+                        set(
+                            significant
+                        )
+                    ),
+                    1,
+                )
+            )
+
+            ordered_bonus = 0.0
+
+            for size in range(
+                min(
+                    4,
+                    len(
+                        significant
+                    ),
+                ),
+                1,
+                -1,
+            ):
+
+                phrase_found = any(
+                    " ".join(
+                        significant[
+                            start:
+                            start + size
+                        ]
+                    )
+                    in normalized_message
+
+                    for start in range(
+                        len(significant)
+                        - size
+                        + 1
+                    )
+                )
+
+                if phrase_found:
+
+                    ordered_bonus = (
+                        size
+                        * 25.0
+                    )
+
+                    break
+
+            score = (
+                overlap_count
+                * 100.0
+                + coverage
+                * 20.0
+                + ordered_bonus
+            )
+
+            candidates.append(
+                (
+                    score,
+                    product,
+                )
+            )
+
+        if not candidates:
+            return []
+
+        candidates.sort(
+            key=lambda item:
+                item[0],
+            reverse=True,
+        )
+
+        best_score = (
+            candidates[0][0]
+        )
+
+        best_products = [
+            product
+            for score, product
+            in candidates
+            if abs(
+                score
+                - best_score
+            )
+            < 0.0001
+        ]
+
+        # Never silently guess when two products
+        # are equally valid.
+        if len(best_products) != 1:
+            return []
+
+        return [
+            best_products[0]
+        ]
+
+    # =====================================================
+    # AVAILABILITY WORDS
+    # =====================================================
+
+    @staticmethod
+    def _contains_availability_request(
+        message: str,
+    ) -> bool:
+
+        text = message.lower()
+
+        return any(
+            phrase in text
+            for phrase in (
+                "in stock",
+                "out of stock",
+                "available",
+                "availability",
+            )
+        )
+
+    # =====================================================
+    # TOKENIZE PRODUCT NAME
+    # =====================================================
+
+    @staticmethod
+    def _reference_tokens(
+        text: str,
+    ) -> list[str]:
+
+        return re.findall(
+            r"[a-z0-9]+",
+            text.lower(),
+        )
+
+    # =====================================================
+    # RESOLVE "CHEAPER ONE", "SECOND ONE", ETC.
     # =====================================================
 
     def _resolve_referenced_products(
@@ -429,10 +982,6 @@ class ChatService:
 
         text = message.lower()
 
-        # ---------------------------------------------
-        # Cheaper / cheapest one
-        # ---------------------------------------------
-
         if re.search(
             r"\b("
             r"cheaper one"
@@ -441,17 +990,11 @@ class ChatService:
             text,
         ):
 
-            cheapest = (
+            return (
                 self._choose_cheapest(
                     products
                 )
             )
-
-            return cheapest
-
-        # ---------------------------------------------
-        # More expensive / expensive one
-        # ---------------------------------------------
 
         if re.search(
             r"\b("
@@ -462,26 +1005,22 @@ class ChatService:
             text,
         ):
 
-            return self._choose_most_expensive(
-                products
+            return (
+                self._choose_most_expensive(
+                    products
+                )
             )
-
-        # ---------------------------------------------
-        # First / second / third
-        # ---------------------------------------------
 
         if re.search(
             r"\bfirst one\b",
             text,
         ):
-
             return products[:1]
 
         if re.search(
             r"\bsecond one\b",
             text,
         ):
-
             return (
                 products[1:2]
                 if len(products) >= 2
@@ -492,22 +1031,19 @@ class ChatService:
             r"\bthird one\b",
             text,
         ):
-
             return (
                 products[2:3]
                 if len(products) >= 3
                 else []
             )
 
-        # If there is exactly one supplied product,
-        # a singular reference naturally points to it.
         if len(products) == 1:
             return products
 
         return products
 
     # =====================================================
-    # Cheapest
+    # CHEAPEST
     # =====================================================
 
     @staticmethod
@@ -557,7 +1093,7 @@ class ChatService:
         ]
 
     # =====================================================
-    # Most expensive
+    # MOST EXPENSIVE
     # =====================================================
 
     @staticmethod
@@ -608,7 +1144,7 @@ class ChatService:
         ]
 
     # =====================================================
-    # Semantic refinement query
+    # MERGE SEMANTIC QUERY FOR REAL REFINEMENTS
     # =====================================================
 
     @staticmethod
@@ -637,7 +1173,7 @@ class ChatService:
         )
 
     # =====================================================
-    # Conversation history
+    # HISTORY FOR GEMINI
     # =====================================================
 
     @staticmethod
@@ -648,27 +1184,22 @@ class ChatService:
         if not history:
             return ""
 
-        lines = []
-
-        for turn in history:
-
-            role = (
+        return "\n".join(
+            (
                 "Customer"
-                if turn.role == "user"
+                if turn.role
+                == "user"
                 else "Assistant"
             )
+            + ": "
+            + turn.content
 
-            lines.append(
-                f"{role}: "
-                f"{turn.content}"
-            )
-
-        return "\n".join(
-            lines
+            for turn
+            in history
         )
 
     # =====================================================
-    # Product names selected by Gemini
+    # WHICH PRODUCTS DID GEMINI ACTUALLY CHOOSE?
     # =====================================================
 
     @staticmethod
@@ -727,7 +1258,7 @@ class ChatService:
         ]
 
     # =====================================================
-    # Card ordering
+    # ORDER CARDS LIKE THE ANSWER
     # =====================================================
 
     @staticmethod
@@ -803,7 +1334,7 @@ class ChatService:
         ]
 
     # =====================================================
-    # API product card
+    # FRONTEND PRODUCT CARD
     # =====================================================
 
     @staticmethod
