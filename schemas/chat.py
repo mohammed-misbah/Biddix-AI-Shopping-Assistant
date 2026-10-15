@@ -1,18 +1,46 @@
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+)
 
 
 class ChatRequest(BaseModel):
+
+    # -------------------------------------------------
+    # REQUEST SECURITY / VALIDATION
+    #
+    # str_strip_whitespace=True
+    # removes spaces from the beginning/end.
+    #
+    # extra="forbid"
+    # rejects JSON fields that our API does not expect.
+    # -------------------------------------------------
+
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        extra="forbid",
+    )
+
     message: str = Field(
         ...,
         min_length=1,
         max_length=2000,
     )
 
-    session_id: str | None = None
-    current_product_id: str | None = None
+    session_id: str | None = Field(
+        default=None,
+        max_length=100,
+    )
 
+    current_product_id: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+     
 
 class ProductReference(BaseModel):
+
     product_id: str
     name: str
 
@@ -30,6 +58,7 @@ class ProductReference(BaseModel):
 
 
 class ChatResponse(BaseModel):
+
     answer: str
     session_id: str
 
