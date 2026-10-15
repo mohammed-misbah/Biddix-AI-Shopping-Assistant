@@ -24,7 +24,9 @@ class RedisService:
 
     # HEALTH CHECK
 
-    async def ping(self) -> bool:
+    async def ping(
+        self,
+    ) -> bool:
         """
         Check whether Redis / Memurai is reachable.
         """
@@ -234,6 +236,7 @@ class RedisService:
         Return remaining TTL in seconds.
 
         Redis can return:
+
         -1 -> key exists but has no expiry
         -2 -> key does not exist
         """
@@ -284,9 +287,121 @@ class RedisService:
 
             raise
 
+    # RATE LIMIT
+
+    async def check_rate_limit(
+        self,
+        identifier: str,
+        max_requests: int,
+        window_seconds: int,
+    ) -> tuple[
+        bool,
+        int,
+        int,
+    ]:
+        """
+        Check whether one identifier is allowed
+        to make another request.
+
+        identifier:
+            Usually the visitor's IP address.
+
+        max_requests:
+            Maximum allowed requests.
+
+        window_seconds:
+            How long the request window lasts.
+
+        Returns:
+            allowed
+            current_count
+            retry_after_seconds
+
+        Example:
+
+            allowed=True
+            current_count=4
+            retry_after_seconds=52
+        """
+
+        key = (
+            "biddix:rate_limit:"
+            f"{identifier}"
+        )
+
+        # ---------------------------------------------
+        # Lua lets Redis perform the counter update
+        # and expiry handling as one safe operation.
+        # ---------------------------------------------
+
+        script = """
+        local current = redis.call('INCR', KEYS[1])
+
+        if current == 1 then
+            redis.call(
+                'EXPIRE',
+                KEYS[1],
+                ARGV[1]
+            )
+        end
+
+        local ttl = redis.call(
+            'TTL',
+            KEYS[1]
+        )
+
+        return {
+            current,
+            ttl
+        }
+        """
+
+        try:
+
+            result = await self.client.eval(
+                script,
+                1,
+                key,
+                window_seconds,
+            )
+
+            current_count = int(
+                result[0]
+            )
+
+            ttl = int(
+                result[1]
+            )
+
+            if ttl < 0:
+                ttl = window_seconds
+
+            allowed = (
+                current_count <= max_requests
+            )
+
+            return (
+                allowed,
+                current_count,
+                ttl,
+            )
+
+        except RedisError as exc:
+
+            logger.exception(
+                "Redis rate-limit check failed "
+                "for identifier %s: %s",
+                identifier,
+                exc,
+            )
+
+            raise
+
     # CLOSE CONNECTION
 
-    async def close(self) -> None:
+    async def close(
+        self,
+    ) -> None:
         """
         Close Redis connection cleanly
         when FastAPI shuts down.

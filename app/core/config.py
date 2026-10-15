@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # 24 hours
     SESSION_TTL_SECONDS: int = 86400
 
+    RATE_LIMIT_REQUESTS: int = 20
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+
     SHOPIFY_STORE_DOMAIN: str = ""
 
     model_config = SettingsConfigDict(
