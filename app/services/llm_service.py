@@ -280,9 +280,7 @@ class LLMService:
                 "Unexpected Gemini failure."
             ) from exc
 
-    # =====================================================
     # PRODUCT SAFETY FOR GEMINI
-    # =====================================================
 
     @staticmethod
     def _prepare_products_for_llm(

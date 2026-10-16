@@ -4,16 +4,23 @@ import time
 import uuid
 from typing import Any
 
+from app.core.exceptions import (
+    RetrievalServiceError,
+)
+
 from app.services.conversation_service import (
     conversation_service,
 )
+
 from app.services.llm_service import (
     llm_service,
 )
+
 from app.services.query_router import (
     QueryRoute,
     query_router,
 )
+
 from app.services.retrieval_service import (
     retrieval_service,
 )
@@ -31,21 +38,10 @@ class ChatService:
         request_id: str | None = None,
     ):
 
-        # =================================================
-        # SESSION
-        # =================================================
-
         if not session_id:
             session_id = str(
                 uuid.uuid4()
             )
-
-        # =================================================
-        # OBSERVABILITY / TIMING
-        #
-        # These values are ONLY for logs.
-        # They do not affect chat behaviour.
-        # =================================================
 
         request_id = (
             request_id
@@ -58,10 +54,6 @@ class ChatService:
 
         retrieval_ms = 0.0
         gemini_ms = 0.0
-
-        # =================================================
-        # EXISTING CONVERSATION STATE
-        # =================================================
 
         previous_mode = (
             conversation_service
@@ -112,31 +104,10 @@ class ChatService:
             )
         )
 
-        # =================================================
-        # ROUTE CURRENT MESSAGE
-        # =================================================
-
         route = query_router.route(
             message=message,
             previous_mode=previous_mode,
         )
-
-        # =================================================
-        # NAMED PRODUCT FROM PREVIOUS RESULTS
-        #
-        # Example:
-        #
-        # Find silver under AED 500
-        #
-        # then:
-        #
-        # Tell me more about Lunar Dragon
-        #
-        # Resolve Lunar Dragon from the previous result set
-        # BEFORE doing another FAISS search.
-        #
-        # Nothing is hard-coded.
-        # =================================================
 
         named_previous_products: list[
             dict[str, Any]
@@ -168,11 +139,6 @@ class ChatService:
                 )
             )
 
-        # ---------------------------------------------
-        # Named previous product overrides generic
-        # knowledge/search routing.
-        # ---------------------------------------------
-
         if named_previous_products:
 
             route = QueryRoute(
@@ -195,13 +161,6 @@ class ChatService:
                 selection_limit=1,
             )
 
-        # =================================================
-        # ROUTE LOG
-        #
-        # Added request_id + session_id.
-        # Chat behaviour is unchanged.
-        # =================================================
-
         logger.info(
             "CHAT ROUTE | "
             "request_id=%s | "
@@ -222,17 +181,9 @@ class ChatService:
             dict[str, Any]
         ] = []
 
-        # =================================================
-        # KNOWLEDGE MODE
-        # =================================================
-
         if route.mode == "knowledge":
 
             products = []
-
-        # =================================================
-        # NAMED PREVIOUS PRODUCT
-        # =================================================
 
         elif named_previous_products:
 
@@ -244,10 +195,6 @@ class ChatService:
                 session_id=session_id,
                 product=products[0],
             )
-
-        # =================================================
-        # REUSE FOCUSED PRODUCT
-        # =================================================
 
         elif (
             route.follow_up_type
@@ -263,10 +210,6 @@ class ChatService:
                 else []
             )
 
-        # =================================================
-        # REUSE SELECTED PRODUCTS
-        # =================================================
-
         elif (
             route.follow_up_type
             == "reuse_selection"
@@ -280,10 +223,6 @@ class ChatService:
                 if selected_ids
                 else []
             )
-
-        # =================================================
-        # REUSE LAST FULL RESULT SET
-        # =================================================
 
         elif (
             route.follow_up_type
@@ -299,15 +238,6 @@ class ChatService:
                 else []
             )
 
-        # =================================================
-        # REFINE OLD SEARCH
-        #
-        # Only short refinement messages arrive here.
-        #
-        # Example:
-        # "Only silver ones."
-        # =================================================
-
         elif (
             route.follow_up_type
             == "refine_search"
@@ -317,9 +247,7 @@ class ChatService:
                 retrieval_service
                 .extract_filters(
                     query=message,
-                    base_filters=(
-                        active_filters
-                    ),
+                    base_filters=active_filters,
                 )
             )
 
@@ -330,25 +258,17 @@ class ChatService:
                 )
             )
 
-            # =============================================
-            # START RETRIEVAL TIMER
-            # =============================================
-
             retrieval_start = (
                 time.perf_counter()
             )
 
-            products = (
-                retrieval_service
-                .retrieve(
-                    query=semantic_query,
-                    filters=new_filters,
-                    limit=5,
-                    strict_match=(
-                        route
-                        .strict_catalog_match
-                    ),
-                )
+            products = self._retrieve_products(
+                query=semantic_query,
+                filters=new_filters,
+                limit=5,
+                strict_match=(
+                    route.strict_catalog_match
+                ),
             )
 
             retrieval_ms = (
@@ -359,28 +279,12 @@ class ChatService:
                 * 1000
             )
 
-            # =============================================
-            # END RETRIEVAL TIMER
-            # =============================================
-
             conversation_service.set_search_state(
                 session_id=session_id,
                 products=products,
                 filters=new_filters,
-                semantic_query=(
-                    semantic_query
-                ),
+                semantic_query=semantic_query,
             )
-
-        # =================================================
-        # FRESH SEARCH
-        #
-        # IMPORTANT:
-        # old active_filters are NOT passed here.
-        #
-        # "Find silver under AED 500"
-        # therefore cannot inherit an old gold/>500 search.
-        # =================================================
 
         else:
 
@@ -391,25 +295,17 @@ class ChatService:
                 )
             )
 
-            # =============================================
-            # START RETRIEVAL TIMER
-            # =============================================
-
             retrieval_start = (
                 time.perf_counter()
             )
 
-            products = (
-                retrieval_service
-                .retrieve(
-                    query=message,
-                    filters=filters,
-                    limit=5,
-                    strict_match=(
-                        route
-                        .strict_catalog_match
-                    ),
-                )
+            products = self._retrieve_products(
+                query=message,
+                filters=filters,
+                limit=5,
+                strict_match=(
+                    route.strict_catalog_match
+                ),
             )
 
             retrieval_ms = (
@@ -420,20 +316,12 @@ class ChatService:
                 * 1000
             )
 
-            # =============================================
-            # END RETRIEVAL TIMER
-            # =============================================
-
             conversation_service.set_search_state(
                 session_id=session_id,
                 products=products,
                 filters=filters,
                 semantic_query=message,
             )
-
-        # =================================================
-        # DETERMINISTIC PRODUCT ACTIONS
-        # =================================================
 
         if (
             route.product_action
@@ -472,10 +360,6 @@ class ChatService:
                     product=products[0],
                 )
 
-        # =================================================
-        # HISTORY
-        # =================================================
-
         conversation_history = (
             self._format_history(
                 history
@@ -487,13 +371,6 @@ class ChatService:
             message=message,
             mode=route.mode,
         )
-
-        # =================================================
-        # LLM
-        #
-        # Only timing was added here.
-        # Gemini input/output behaviour is unchanged.
-        # =================================================
 
         gemini_start = (
             time.perf_counter()
@@ -522,10 +399,6 @@ class ChatService:
             * 1000
         )
 
-        # =================================================
-        # CHAT TOTAL TIME
-        # =================================================
-
         chat_total_ms = (
             (
                 time.perf_counter()
@@ -533,10 +406,6 @@ class ChatService:
             )
             * 1000
         )
-
-        # =================================================
-        # STRUCTURED CHAT METRICS LOG
-        # =================================================
 
         logger.info(
             "CHAT METRICS | "
@@ -567,10 +436,6 @@ class ChatService:
             message=answer,
         )
 
-        # =================================================
-        # KNOWLEDGE MODE NEVER RETURNS PRODUCT CARDS
-        # =================================================
-
         if route.mode == "knowledge":
 
             return {
@@ -579,20 +444,12 @@ class ChatService:
                 "products": [],
             }
 
-        # =================================================
-        # ORDER CARDS TO MATCH ANSWER
-        # =================================================
-
         ordered_products = (
             self._order_products_by_answer(
                 products=products,
                 answer=answer,
             )
         )
-
-        # =================================================
-        # CHOOSE ONE / TWO
-        # =================================================
 
         if (
             route.product_action
@@ -611,8 +468,6 @@ class ChatService:
                 )
             )
 
-            # If Gemini fails to repeat enough exact names,
-            # fill deterministically from the supplied order.
             if (
                 len(selected_products)
                 < route.selection_limit
@@ -668,18 +523,12 @@ class ChatService:
 
                 conversation_service.set_focused_product(
                     session_id=session_id,
-                    product=(
-                        selected_products[0]
-                    ),
+                    product=selected_products[0],
                 )
 
             ordered_products = (
                 selected_products
             )
-
-        # =================================================
-        # API RESPONSE
-        # =================================================
 
         return {
             "answer": answer,
@@ -693,9 +542,40 @@ class ChatService:
             ],
         }
 
-    # =====================================================
-    # DOES THIS LOOK LIKE A NAMED-PRODUCT FOLLOW-UP?
-    # =====================================================
+    def _retrieve_products(
+        self,
+        query: str,
+        filters,
+        limit: int,
+        strict_match: bool,
+    ) -> list[
+        dict[str, Any]
+    ]:
+
+        try:
+
+            return retrieval_service.retrieve(
+                query=query,
+                filters=filters,
+                limit=limit,
+                strict_match=strict_match,
+            )
+
+        except RetrievalServiceError:
+
+            raise
+
+        except Exception as exc:
+
+            logger.exception(
+                "PRODUCT RETRIEVAL ERROR | "
+                "error_type=%s",
+                type(exc).__name__,
+            )
+
+            raise RetrievalServiceError(
+                "Product retrieval failed."
+            ) from exc
 
     @staticmethod
     def _looks_like_named_product_follow_up(
@@ -744,21 +624,12 @@ class ChatService:
         ):
             return True
 
-        # Direct short name:
-        #
-        # "Lunar Dragon?"
-        #
-        # Matching still has to be unique.
         return (
             len(
                 text.split()
             )
             <= 6
         )
-
-    # =====================================================
-    # MATCH A PRODUCT NAME INSIDE PREVIOUS RESULTS
-    # =====================================================
 
     @classmethod
     def _match_named_product_reference(
@@ -816,10 +687,6 @@ class ChatService:
             str,
             int,
         ] = {}
-
-        # ---------------------------------------------
-        # Prepare product names
-        # ---------------------------------------------
 
         for product in products:
 
@@ -882,10 +749,6 @@ class ChatService:
             ]
         ] = []
 
-        # ---------------------------------------------
-        # Score possible product references
-        # ---------------------------------------------
-
         for (
             product,
             name_tokens,
@@ -898,7 +761,6 @@ class ChatService:
                 )
             )
 
-            # Full name in message.
             if (
                 normalized_name
                 and normalized_name
@@ -928,15 +790,10 @@ class ChatService:
             if overlap_count == 0:
                 continue
 
-            # Two name words:
-            #
-            # Lunar + Dragon
             strong_match = (
                 overlap_count >= 2
             )
 
-            # One distinctive word is allowed only when
-            # it belongs to exactly one previous result.
             single_unique_match = False
 
             if overlap_count == 1:
@@ -995,7 +852,6 @@ class ChatService:
                         ]
                     )
                     in normalized_message
-
                     for start in range(
                         len(significant)
                         - size
@@ -1051,18 +907,12 @@ class ChatService:
             < 0.0001
         ]
 
-        # Never silently guess when two products
-        # are equally valid.
         if len(best_products) != 1:
             return []
 
         return [
             best_products[0]
         ]
-
-    # =====================================================
-    # AVAILABILITY WORDS
-    # =====================================================
 
     @staticmethod
     def _contains_availability_request(
@@ -1081,10 +931,6 @@ class ChatService:
             )
         )
 
-    # =====================================================
-    # TOKENIZE PRODUCT NAME
-    # =====================================================
-
     @staticmethod
     def _reference_tokens(
         text: str,
@@ -1094,10 +940,6 @@ class ChatService:
             r"[a-z0-9]+",
             text.lower(),
         )
-
-    # =====================================================
-    # RESOLVE "CHEAPER ONE", "SECOND ONE", ETC.
-    # =====================================================
 
     def _resolve_referenced_products(
         self,
@@ -1174,10 +1016,6 @@ class ChatService:
 
         return products
 
-    # =====================================================
-    # CHEAPEST
-    # =====================================================
-
     @staticmethod
     def _choose_cheapest(
         products: list[
@@ -1223,10 +1061,6 @@ class ChatService:
         return [
             priced[0][1]
         ]
-
-    # =====================================================
-    # MOST EXPENSIVE
-    # =====================================================
 
     @staticmethod
     def _choose_most_expensive(
@@ -1275,10 +1109,6 @@ class ChatService:
             priced[0][1]
         ]
 
-    # =====================================================
-    # MERGE SEMANTIC QUERY FOR REAL REFINEMENTS
-    # =====================================================
-
     @staticmethod
     def _merge_semantic_query(
         previous_query: str,
@@ -1304,10 +1134,6 @@ class ChatService:
             f"{new_message}"
         )
 
-    # =====================================================
-    # HISTORY FOR GEMINI
-    # =====================================================
-
     @staticmethod
     def _format_history(
         history,
@@ -1329,10 +1155,6 @@ class ChatService:
             for turn
             in history
         )
-
-    # =====================================================
-    # WHICH PRODUCTS DID GEMINI ACTUALLY CHOOSE?
-    # =====================================================
 
     @staticmethod
     def _products_mentioned_in_answer(
@@ -1388,10 +1210,6 @@ class ChatService:
             for _, product
             in found[:limit]
         ]
-
-    # =====================================================
-    # ORDER CARDS LIKE THE ANSWER
-    # =====================================================
 
     @staticmethod
     def _order_products_by_answer(
@@ -1464,10 +1282,6 @@ class ChatService:
             for _, product
             in ranked
         ]
-
-    # =====================================================
-    # FRONTEND PRODUCT CARD
-    # =====================================================
 
     @staticmethod
     def _serialize_product(

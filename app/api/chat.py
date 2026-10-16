@@ -17,6 +17,8 @@ from app.core.config import settings
 from app.core.exceptions import (
     LLMServiceError,
     LLMTimeoutError,
+    RedisServiceError,
+    RetrievalServiceError,
 )
 
 from app.services.chat_service import (
@@ -47,19 +49,11 @@ async def chat(
     response: Response,
 ):
 
-    # =====================================================
-    # REQUEST ID
-    # =====================================================
-
     request_id = getattr(
         request.state,
         "request_id",
         "unknown",
     )
-
-    # =====================================================
-    # CLIENT IP
-    # =====================================================
 
     client_ip = (
         request.client.host
@@ -69,27 +63,15 @@ async def chat(
 
     try:
 
-        # =================================================
-        # RATE LIMIT CHECK
-        # =================================================
-
         (
             allowed,
             current_count,
             retry_after_seconds,
         ) = await redis_service.check_rate_limit(
             identifier=client_ip,
-            max_requests=(
-                settings.RATE_LIMIT_REQUESTS
-            ),
-            window_seconds=(
-                settings.RATE_LIMIT_WINDOW_SECONDS
-            ),
+            max_requests=settings.RATE_LIMIT_REQUESTS,
+            window_seconds=settings.RATE_LIMIT_WINDOW_SECONDS,
         )
-
-        # =================================================
-        # RATE LIMIT HEADERS
-        # =================================================
 
         response.headers[
             "X-RateLimit-Limit"
@@ -108,10 +90,6 @@ async def chat(
         ] = str(
             remaining
         )
-
-        # =================================================
-        # BLOCK RATE-LIMITED REQUEST
-        # =================================================
 
         if not allowed:
 
@@ -136,25 +114,15 @@ async def chat(
                     "Please try again shortly."
                 ),
                 headers={
-                    "Retry-After":
-                        str(
-                            retry_after_seconds
-                        ),
-
-                    "X-RateLimit-Limit":
-                        str(
-                            settings
-                            .RATE_LIMIT_REQUESTS
-                        ),
-
-                    "X-RateLimit-Remaining":
-                        "0",
+                    "Retry-After": str(
+                        retry_after_seconds
+                    ),
+                    "X-RateLimit-Limit": str(
+                        settings.RATE_LIMIT_REQUESTS
+                    ),
+                    "X-RateLimit-Remaining": "0",
                 },
             )
-
-        # =================================================
-        # RATE LIMIT SUCCESS LOG
-        # =================================================
 
         logger.info(
             "RATE LIMIT OK | "
@@ -170,10 +138,6 @@ async def chat(
             remaining,
         )
 
-        # =================================================
-        # NORMAL CHAT
-        # =================================================
-
         result = await chat_service.chat(
             message=payload.message,
             session_id=payload.session_id,
@@ -183,16 +147,6 @@ async def chat(
         return ChatResponse(
             **result
         )
-
-    # =====================================================
-    # GEMINI TIMEOUT
-    #
-    # Internal:
-    # LLMTimeoutError
-    #
-    # Customer:
-    # safe 503 message
-    # =====================================================
 
     except LLMTimeoutError:
 
@@ -212,20 +166,6 @@ async def chat(
             ),
         )
 
-    # =====================================================
-    # GEMINI SERVICE FAILURE
-    #
-    # Examples:
-    #
-    # Gemini 500
-    # Gemini 429
-    # invalid Gemini response
-    # no candidates
-    # empty output
-    #
-    # Customer still gets a clean message.
-    # =====================================================
-
     except LLMServiceError:
 
         logger.error(
@@ -244,26 +184,45 @@ async def chat(
             ),
         )
 
-    # =====================================================
-    # INTENTIONAL HTTP ERRORS
-    #
-    # Example:
-    # 429 rate limit
-    #
-    # Keep the original status code.
-    # =====================================================
+    except RedisServiceError:
+
+        logger.error(
+            "REDIS SERVICE ERROR | "
+            "request_id=%s | "
+            "client_ip=%s",
+            request_id,
+            client_ip,
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The chat service is temporarily unavailable. "
+                "Please try again shortly."
+            ),
+        )
+
+    except RetrievalServiceError:
+
+        logger.error(
+            "RETRIEVAL SERVICE ERROR | "
+            "request_id=%s | "
+            "client_ip=%s",
+            request_id,
+            client_ip,
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Product search is temporarily unavailable. "
+                "Please try again shortly."
+            ),
+        )
 
     except HTTPException:
 
         raise
-
-    # =====================================================
-    # UNEXPECTED SERVER ERROR
-    #
-    # Customer receives a clean message.
-    #
-    # Technical error remains only in logs.
-    # =====================================================
 
     except Exception as exc:
 
@@ -282,7 +241,6 @@ async def chat(
         raise HTTPException(
             status_code=500,
             detail=(
-                "Unable to process "
-                "chat request."
+                "Unable to process chat request."
             ),
         ) from exc
