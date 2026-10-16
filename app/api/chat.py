@@ -18,7 +18,7 @@ from app.core.exceptions import (
     LLMServiceError,
     LLMTimeoutError,
 )
-
+add structured API error handling for Gemini failures
 from app.services.chat_service import (
     chat_service,
 )
