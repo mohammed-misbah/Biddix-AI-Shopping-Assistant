@@ -5,6 +5,10 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.core.exceptions import (
+    LLMServiceError,
+    LLMTimeoutError,
+)
 from app.core.prompts import (
     build_assistant_prompt,
 )
@@ -42,6 +46,10 @@ class LLMService:
         response_style: str = "normal",
     ) -> str:
 
+        # =================================================
+        # PREPARE SAFE PRODUCT DATA FOR GEMINI
+        # =================================================
+
         safe_products = (
             self._prepare_products_for_llm(
                 products
@@ -53,6 +61,10 @@ class LLMService:
             ensure_ascii=False,
             separators=(",", ":"),
         )
+
+        # =================================================
+        # BUILD PROMPT
+        # =================================================
 
         prompt = build_assistant_prompt(
             user_message=user_message,
@@ -69,11 +81,19 @@ class LLMService:
             ),
         )
 
+        # =================================================
+        # GEMINI URL
+        # =================================================
+
         url = (
             f"{settings.API_BASE_URL}/"
             f"{settings.GEMINI_MODEL}"
             ":generateContent"
         )
+
+        # =================================================
+        # GEMINI REQUEST BODY
+        # =================================================
 
         payload = {
             "contents": [
@@ -95,6 +115,13 @@ class LLMService:
             },
         }
 
+        # =================================================
+        # GEMINI HEADERS
+        #
+        # API key stays server-side.
+        # It is never returned to the frontend.
+        # =================================================
+
         headers = {
             "Content-Type":
                 "application/json",
@@ -105,15 +132,34 @@ class LLMService:
 
         try:
 
+            # =============================================
+            # CALL GEMINI
+            # =============================================
+
             response = await self.client.post(
                 url,
                 headers=headers,
                 json=payload,
             )
 
+            # =============================================
+            # HTTP ERRORS
+            #
+            # Examples:
+            # 400
+            # 401
+            # 403
+            # 429
+            # 500
+            # =============================================
+
             response.raise_for_status()
 
             data = response.json()
+
+            # =============================================
+            # READ CANDIDATES
+            # =============================================
 
             candidates = data.get(
                 "candidates",
@@ -123,11 +169,12 @@ class LLMService:
             if not candidates:
 
                 logger.error(
-                    "Gemini returned no candidates: %s",
-                    data,
+                    "Gemini returned no candidates."
                 )
 
-                return self._fallback()
+                raise LLMServiceError(
+                    "Gemini returned no candidates."
+                )
 
             candidate = candidates[0]
 
@@ -142,6 +189,10 @@ class LLMService:
                     [],
                 )
             )
+
+            # =============================================
+            # BUILD TEXT ANSWER
+            # =============================================
 
             answer = "".join(
                 part.get(
@@ -162,37 +213,76 @@ class LLMService:
                     "Gemini returned empty output."
                 )
 
-                return self._fallback()
+                raise LLMServiceError(
+                    "Gemini returned empty output."
+                )
 
             return answer
 
-        except httpx.TimeoutException:
+        # =================================================
+        # GEMINI TIMEOUT
+        # =================================================
+
+        except httpx.TimeoutException as exc:
 
             logger.error(
                 "Gemini timed out after %s seconds.",
                 settings.HARD_TIMEOUT_SECONDS,
             )
 
-            return self._fallback()
+            raise LLMTimeoutError(
+                "Gemini request timed out."
+            ) from exc
+
+        # =================================================
+        # GEMINI HTTP ERROR
+        # =================================================
 
         except httpx.HTTPStatusError as exc:
 
             logger.error(
-                "Gemini HTTP %s: %s",
+                "Gemini HTTP error | status=%s",
                 exc.response.status_code,
-                exc.response.text,
             )
 
-            return self._fallback()
+            raise LLMServiceError(
+                "Gemini returned an HTTP error."
+            ) from exc
+
+        # =================================================
+        # OUR OWN EXPECTED SERVICE ERRORS
+        #
+        # Important:
+        # do not convert these into another exception.
+        # Just send them upward to chat.py.
+        # =================================================
+
+        except (
+            LLMTimeoutError,
+            LLMServiceError,
+        ):
+
+            raise
+
+        # =================================================
+        # UNKNOWN GEMINI ERROR
+        # =================================================
 
         except Exception as exc:
 
             logger.exception(
-                "Unexpected Gemini error: %s",
-                exc,
+                "Unexpected Gemini error | "
+                "error_type=%s",
+                type(exc).__name__,
             )
 
-            return self._fallback()
+            raise LLMServiceError(
+                "Unexpected Gemini failure."
+            ) from exc
+
+    # =====================================================
+    # PRODUCT SAFETY FOR GEMINI
+    # =====================================================
 
     @staticmethod
     def _prepare_products_for_llm(
@@ -233,6 +323,7 @@ class LLMService:
                     TypeError,
                     ValueError,
                 ):
+
                     stock = 0
 
                 safe[
@@ -263,14 +354,6 @@ class LLMService:
             )
 
         return safe_products
-
-    @staticmethod
-    def _fallback() -> str:
-
-        return (
-            "I'm having trouble preparing the answer "
-            "right now. Please try again in a moment."
-        )
 
 
 llm_service = LLMService()

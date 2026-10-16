@@ -14,6 +14,11 @@ from schemas.chat import (
 
 from app.core.config import settings
 
+from app.core.exceptions import (
+    LLMServiceError,
+    LLMTimeoutError,
+)
+
 from app.services.chat_service import (
     chat_service,
 )
@@ -54,12 +59,6 @@ async def chat(
 
     # =====================================================
     # CLIENT IP
-    #
-    # For local testing:
-    # 127.0.0.1
-    #
-    # Later in production, if you are behind a trusted
-    # reverse proxy, we can handle forwarded IPs properly.
     # =====================================================
 
     client_ip = (
@@ -72,13 +71,6 @@ async def chat(
 
         # =================================================
         # RATE LIMIT CHECK
-        #
-        # Example:
-        #
-        # 20 requests
-        # during
-        # 60 seconds
-        # per IP
         # =================================================
 
         (
@@ -96,10 +88,7 @@ async def chat(
         )
 
         # =================================================
-        # RATE LIMIT RESPONSE HEADERS
-        #
-        # These are useful for debugging and later
-        # frontend/API clients.
+        # RATE LIMIT HEADERS
         # =================================================
 
         response.headers[
@@ -121,10 +110,7 @@ async def chat(
         )
 
         # =================================================
-        # BLOCK REQUEST
-        #
-        # IMPORTANT:
-        # We stop here BEFORE chat_service and Gemini.
+        # BLOCK RATE-LIMITED REQUEST
         # =================================================
 
         if not allowed:
@@ -154,20 +140,20 @@ async def chat(
                         str(
                             retry_after_seconds
                         ),
+
                     "X-RateLimit-Limit":
                         str(
                             settings
                             .RATE_LIMIT_REQUESTS
                         ),
+
                     "X-RateLimit-Remaining":
                         "0",
                 },
             )
 
         # =================================================
-        # OPTIONAL RATE-LIMIT LOG
-        #
-        # This lets you see the counter while testing.
+        # RATE LIMIT SUCCESS LOG
         # =================================================
 
         logger.info(
@@ -186,8 +172,6 @@ async def chat(
 
         # =================================================
         # NORMAL CHAT
-        #
-        # Nothing about your chat logic changes here.
         # =================================================
 
         result = await chat_service.chat(
@@ -201,19 +185,84 @@ async def chat(
         )
 
     # =====================================================
-    # IMPORTANT:
+    # GEMINI TIMEOUT
     #
-    # Keep intentional HTTP errors such as 429.
+    # Internal:
+    # LLMTimeoutError
     #
-    # Without this block, the 429 could be converted
-    # into a 500 by the generic exception handler.
+    # Customer:
+    # safe 503 message
+    # =====================================================
+
+    except LLMTimeoutError:
+
+        logger.warning(
+            "LLM TIMEOUT | "
+            "request_id=%s | "
+            "client_ip=%s",
+            request_id,
+            client_ip,
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The AI service is taking too long "
+                "to respond. Please try again shortly."
+            ),
+        )
+
+    # =====================================================
+    # GEMINI SERVICE FAILURE
+    #
+    # Examples:
+    #
+    # Gemini 500
+    # Gemini 429
+    # invalid Gemini response
+    # no candidates
+    # empty output
+    #
+    # Customer still gets a clean message.
+    # =====================================================
+
+    except LLMServiceError:
+
+        logger.error(
+            "LLM SERVICE ERROR | "
+            "request_id=%s | "
+            "client_ip=%s",
+            request_id,
+            client_ip,
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The AI service is temporarily unavailable. "
+                "Please try again shortly."
+            ),
+        )
+
+    # =====================================================
+    # INTENTIONAL HTTP ERRORS
+    #
+    # Example:
+    # 429 rate limit
+    #
+    # Keep the original status code.
     # =====================================================
 
     except HTTPException:
+
         raise
 
     # =====================================================
     # UNEXPECTED SERVER ERROR
+    #
+    # Customer receives a clean message.
+    #
+    # Technical error remains only in logs.
     # =====================================================
 
     except Exception as exc:
