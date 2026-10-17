@@ -14,9 +14,9 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     MAX_TURNS: int = 10
     GEMINI_API_KEY: str
-    GEMINI_MODEL: str = (
-        "gemini-3.5-flash"
-    )
+    # GEMINI_MODEL: str = "this-model-does-not-exist"
+    GEMINI_MODEL: str = "gemini-3.5-flash"
+
 
     HARD_TIMEOUT_SECONDS: int = 20
 
