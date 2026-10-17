@@ -102,16 +102,6 @@ class QueryRouter:
 
     # =====================================================
     # STRONG SHOPPING SIGNALS
-    #
-    # These are used to distinguish:
-    #
-    # "I need to learn about German coins"
-    # -> knowledge
-    #
-    # from:
-    #
-    # "I need to find German coins under AED 500"
-    # -> catalog / mixed
     # =====================================================
 
     STRONG_CATALOG_PATTERNS = (
@@ -138,9 +128,6 @@ class QueryRouter:
 
     # =====================================================
     # STRICT CATALOG
-    #
-    # These requests are specifically asking whether a
-    # product exists / is available in the catalog.
     # =====================================================
 
     STRICT_CATALOG_PATTERNS = (
@@ -154,25 +141,6 @@ class QueryRouter:
 
     # =====================================================
     # EXPLICIT NEW SEARCH
-    #
-    # VERY IMPORTANT:
-    #
-    # These MUST be detected globally, before previous-mode
-    # handling.
-    #
-    # That means:
-    #
-    # German knowledge conversation
-    # -> "Find silver under AED 500"
-    #
-    # becomes a clean new catalog search.
-    #
-    # Also:
-    #
-    # old gold search
-    # -> "Find silver under AED 500"
-    #
-    # resets old filters.
     # =====================================================
 
     FRESH_SEARCH_PATTERNS = (
@@ -190,12 +158,6 @@ class QueryRouter:
 
     # =====================================================
     # SEARCH REFINEMENT
-    #
-    # These keep the previous search context when they are
-    # short follow-ups such as:
-    #
-    # "Only silver ones"
-    # "Under AED 500 instead"
     # =====================================================
 
     REFINEMENT_PATTERNS = (
@@ -277,18 +239,6 @@ class QueryRouter:
 
         # =================================================
         # 1. GLOBAL EXPLICIT FRESH SEARCH
-        #
-        # This MUST happen before checking previous_mode.
-        #
-        # It fixes:
-        #
-        # knowledge
-        # -> "Find silver under AED 500"
-        #
-        # and:
-        #
-        # old filtered catalog search
-        # -> "Find silver under AED 500"
         # =================================================
 
         if self._matches_any(
@@ -319,12 +269,39 @@ class QueryRouter:
         ):
 
             # ---------------------------------------------
+            # Availability of CURRENT focused product
+            #
+            # Examples:
+            # "Is it available?"
+            # "Is it in stock?"
+            # "Is that available?"
+            #
+            # Keep this rule narrow. We intentionally do NOT
+            # make the word "it" a generic product reference
+            # everywhere, because that would affect unrelated
+            # routing.
+            # ---------------------------------------------
+
+            if (
+                self._contains_availability_question(
+                    text
+                )
+                and re.search(
+                    r"\b(it|this|that)\b",
+                    text,
+                )
+            ):
+                return QueryRoute(
+                    mode=previous_mode,
+                    is_follow_up=True,
+                    follow_up_type="reuse_focus",
+                    product_action="availability",
+                    response_style=style,
+                    selection_limit=1,
+                )
+
+            # ---------------------------------------------
             # Availability of referenced product
-            #
-            # Example:
-            # "Is the cheaper one in stock?"
-            #
-            # This must beat refinement logic.
             # ---------------------------------------------
 
             if (
@@ -350,10 +327,6 @@ class QueryRouter:
 
             # ---------------------------------------------
             # Focused-product factual/details follow-up
-            #
-            # Examples:
-            # "Tell me more about that coin"
-            # "What's its purity?"
             # ---------------------------------------------
 
             if self._is_focused_detail_reference(
@@ -368,8 +341,88 @@ class QueryRouter:
                     selection_limit=1,
                 )
 
+            # =============================================
+            # COMPARE TWO PRODUCTS FROM PREVIOUS RESULTS
+            #
+            # IMPORTANT FIX:
+            #
+            # Search:
+            #   Find silver under AED 500
+            #
+            # Follow-up:
+            #   Compare two pieces
+            #
+            # There may be no selected products yet.
+            #
+            # So this must use the FULL previous result
+            # set, not selected_product_ids.
+            #
+            # We use product_action="choose" because the
+            # existing ChatService already knows how to:
+            #
+            # 1. give Gemini the previous results
+            # 2. detect the two products Gemini mentions
+            # 3. save those two as selected products
+            #
+            # The user's actual message still says
+            # "Compare two pieces", so Gemini performs
+            # the comparison.
+            #
+            # No ChatService change is required.
+            # =============================================
+
+            if re.search(
+                r"\bcompare\s+"
+                r"(?:any\s+)?"
+                r"(?:two|2)\s+"
+                r"(?:pieces?|coins?|products?|items?)\b",
+                text,
+            ):
+                return QueryRoute(
+                    mode=previous_mode,
+                    is_follow_up=True,
+                    follow_up_type="reuse_results",
+                    product_action="choose",
+                    response_style=style,
+                    selection_limit=2,
+                )
+
             # ---------------------------------------------
-            # Compare selected products
+            # Compare products that were ALREADY selected
+            #
+            # Examples:
+            #
+            # "Compare those two"
+            # "Compare these two"
+            # "Compare them"
+            # ---------------------------------------------
+
+            if (
+                re.search(
+                    r"\bcompare\b",
+                    text,
+                )
+                and re.search(
+                    r"\b("
+                    r"those two"
+                    r"|these two"
+                    r"|them"
+                    r")\b",
+                    text,
+                )
+            ):
+                return QueryRoute(
+                    mode=previous_mode,
+                    is_follow_up=True,
+                    follow_up_type="reuse_selection",
+                    product_action="compare",
+                    response_style=style,
+                )
+
+            # ---------------------------------------------
+            # Generic compare
+            #
+            # Preserve your existing behaviour.
             # ---------------------------------------------
 
             if re.search(
@@ -448,11 +501,6 @@ class QueryRouter:
 
             # ---------------------------------------------
             # Generic references
-            #
-            # Examples:
-            # that coin
-            # those two
-            # second one
             # ---------------------------------------------
 
             if self._contains_product_reference(
@@ -472,13 +520,6 @@ class QueryRouter:
 
             # ---------------------------------------------
             # Search refinement
-            #
-            # Examples:
-            # "Only silver ones"
-            # "Under AED 500 instead"
-            #
-            # Because fresh search commands were already
-            # caught globally above, these are now safe.
             # ---------------------------------------------
 
             if self._matches_any(
@@ -516,10 +557,6 @@ class QueryRouter:
 
         # ---------------------------------------------
         # Knowledge + weak shopping wording
-        #
-        # "I need to learn about German coins"
-        #
-        # should remain knowledge.
         # ---------------------------------------------
 
         if knowledge and catalog:
@@ -570,10 +607,6 @@ class QueryRouter:
 
         # =================================================
         # 4. GENERIC CONTINUATION
-        #
-        # This is only used after explicit fresh search,
-        # product references, refinement, and new-intent
-        # classification have all failed.
         # =================================================
 
         if previous_mode is not None:
@@ -612,7 +645,7 @@ class QueryRouter:
     ) -> bool:
 
         patterns = (
-            # Tell me more about that coin
+
             (
                 r"\b("
                 r"tell me more"
@@ -624,7 +657,6 @@ class QueryRouter:
                 r"\s+(coin|one|product)?\b"
             ),
 
-            # What's its purity?
             (
                 r"\bwhat(?:'s| is)\s+its\s+"
                 r"("
@@ -638,7 +670,6 @@ class QueryRouter:
                 r")\b"
             ),
 
-            # How much is it?
             r"\bhow much is (it|that|this)\b",
         )
 
@@ -647,7 +678,8 @@ class QueryRouter:
                 pattern,
                 text,
             )
-            for pattern in patterns
+            for pattern
+            in patterns
         )
 
     # =====================================================
@@ -697,7 +729,8 @@ class QueryRouter:
                 text,
                 re.IGNORECASE,
             )
-            for pattern in patterns
+            for pattern
+            in patterns
         )
 
     # =====================================================
@@ -728,9 +761,6 @@ class QueryRouter:
         text: str,
     ) -> FollowUpType:
 
-        # Comparative / plural references belong to
-        # previously selected products.
-
         if re.search(
             r"\b("
             r"cheaper one"
@@ -745,7 +775,6 @@ class QueryRouter:
         ):
             return "reuse_selection"
 
-        # Direct singular reference uses focused product.
         return "reuse_focus"
 
     # =====================================================
@@ -793,7 +822,8 @@ class QueryRouter:
                 text,
                 flags=re.IGNORECASE,
             )
-            for pattern in patterns
+            for pattern
+            in patterns
         )
 
 
