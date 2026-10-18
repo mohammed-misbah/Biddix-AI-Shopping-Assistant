@@ -1,29 +1,19 @@
+
 import logging
-import re
+import os
 import time
 import uuid
 from typing import Any
 
-from app.core.exceptions import (
-    RetrievalServiceError,
-)
-
+from app.core.exceptions import RetrievalServiceError
 from app.services.conversation_service import (
+    CatalogFilters,
     conversation_service,
 )
-
-from app.services.llm_service import (
-    llm_service,
-)
-
-from app.services.query_router import (
-    QueryRoute,
-    query_router,
-)
-
-from app.services.retrieval_service import (
-    retrieval_service,
-)
+from app.services.llm_service import llm_service
+from app.services.product_service import product_service
+from app.services.query_router import query_router
+from app.services.retrieval_service import retrieval_service
 
 
 logger = logging.getLogger(__name__)
@@ -36,267 +26,609 @@ class ChatService:
         message: str,
         session_id: str | None = None,
         request_id: str | None = None,
-    ):
+        current_product_id: str | None = None,
+    ) -> dict[str, Any]:
 
-        if not session_id:
-            session_id = str(
-                uuid.uuid4()
+        session_id = session_id or str(uuid.uuid4())
+        request_id = request_id or "unknown"
+
+        started = time.perf_counter()
+
+        history = conversation_service.get_history(
+            session_id
+        )
+        history_text = self._format_history(history)
+
+        previous_mode = (
+            conversation_service.get_last_mode(
+                session_id
             )
-
-        request_id = (
-            request_id
-            or "unknown"
         )
 
-        chat_start_time = (
-            time.perf_counter()
+        result_ids = (
+            conversation_service
+            .get_last_result_product_ids(session_id)
+        )
+        selected_ids = (
+            conversation_service
+            .get_selected_product_ids(session_id)
+        )
+        focused_id = (
+            conversation_service
+            .get_focused_product_id(session_id)
+        )
+
+        previous_products = (
+            retrieval_service.get_products_by_ids(
+                result_ids
+            )
+        )
+        selected_products = (
+            retrieval_service.get_products_by_ids(
+                selected_ids
+            )
+        )
+        focused_products = (
+            retrieval_service.get_products_by_ids(
+                [focused_id]
+            )
+            if focused_id
+            else []
+        )
+        focused_product = (
+            focused_products[0]
+            if focused_products
+            else None
+        )
+
+        if current_product_id:
+            requested = (
+                retrieval_service.get_products_by_ids(
+                    [current_product_id]
+                )
+            )
+            if requested:
+                focused_product = requested[0]
+
+        gemini_first = (
+            os.getenv(
+                "BIDDIX_GEMINI_FIRST", "0"
+            ).strip().lower()
+            in {"1", "true", "yes"}
         )
 
         retrieval_ms = 0.0
+        intent_ms = 0.0
         gemini_ms = 0.0
 
-        previous_mode = (
-            conversation_service
-            .get_last_mode(
-                session_id
-            )
-        )
+        if gemini_first:
+            intent_started = time.perf_counter()
 
-        history = (
-            conversation_service
-            .get_history(
-                session_id
-            )
-        )
-
-        last_result_ids = (
-            conversation_service
-            .get_last_result_product_ids(
-                session_id
-            )
-        )
-
-        selected_ids = (
-            conversation_service
-            .get_selected_product_ids(
-                session_id
-            )
-        )
-
-        focused_id = (
-            conversation_service
-            .get_focused_product_id(
-                session_id
-            )
-        )
-
-        active_filters = (
-            conversation_service
-            .get_active_filters(
-                session_id
-            )
-        )
-
-        previous_semantic_query = (
-            conversation_service
-            .get_semantic_query(
-                session_id
-            )
-        )
-
-        route = query_router.route(
-            message=message,
-            previous_mode=previous_mode,
-        )
-
-        named_previous_products: list[
-            dict[str, Any]
-        ] = []
-
-        if (
-            previous_mode
-            in (
-                "catalog",
-                "mixed",
-            )
-            and last_result_ids
-            and self._looks_like_named_product_follow_up(
-                message
-            )
-        ):
-
-            previous_products = (
-                retrieval_service
-                .get_products_by_ids(
-                    last_result_ids
-                )
+            intent = await llm_service.interpret_request(
+                user_message=message,
+                conversation_history=history_text,
+                previous_products=previous_products,
+                selected_products=selected_products,
+                focused_product=focused_product,
             )
 
-            named_previous_products = (
-                self._match_named_product_reference(
+            intent_ms = (
+                time.perf_counter() - intent_started
+            ) * 1000
+
+            retrieval_started = time.perf_counter()
+
+            products, mode, action, limit = (
+                self._gemini_products(
                     message=message,
-                    products=previous_products,
+                    intent=intent,
+                    previous_products=previous_products,
+                    selected_products=selected_products,
+                    focused_product=focused_product,
+                    session_id=session_id,
                 )
             )
 
-        if named_previous_products:
+            retrieval_ms = (
+                time.perf_counter() - retrieval_started
+            ) * 1000
 
-            route = QueryRoute(
-                mode=(
-                    previous_mode
-                    or "catalog"
-                ),
-                is_follow_up=True,
-                follow_up_type="reuse_results",
-                product_action=(
-                    "availability"
-                    if self._contains_availability_request(
-                        message
-                    )
-                    else "detail"
-                ),
-                response_style=(
-                    route.response_style
-                ),
-                selection_limit=1,
+            response_style = intent.get(
+                "response_style", "normal"
+            )
+
+            route_name = intent.get(
+                "intent", "unknown"
+            )
+
+        else:
+            route = query_router.route(
+                message=message,
+                previous_mode=previous_mode,
+            )
+
+            retrieval_started = time.perf_counter()
+
+            products = self._legacy_products(
+                message=message,
+                session_id=session_id,
+                route=route,
+                previous_products=previous_products,
+                selected_products=selected_products,
+                focused_product=focused_product,
+            )
+
+            retrieval_ms = (
+                time.perf_counter() - retrieval_started
+            ) * 1000
+
+            mode = route.mode
+            action = route.product_action
+            limit = route.selection_limit
+            response_style = route.response_style
+            route_name = (
+                route.follow_up_type
+                if route.is_follow_up
+                else "new"
             )
 
         logger.info(
-            "CHAT ROUTE | "
-            "request_id=%s | "
-            "session_id=%s | "
-            "mode=%s | "
-            "follow_up=%s | "
-            "follow_up_type=%s | "
-            "action=%s",
+            "CHAT ROUTE | request_id=%s | "
+            "session_id=%s | mode=%s | "
+            "action=%s | route=%s | "
+            "gemini_first=%s",
             request_id,
             session_id,
-            route.mode,
-            route.is_follow_up,
-            route.follow_up_type,
-            route.product_action,
+            mode,
+            action,
+            route_name,
+            gemini_first,
         )
 
-        products: list[
-            dict[str, Any]
-        ] = []
+        conversation_service.add_user_message(
+            session_id=session_id,
+            message=message,
+            mode=mode,
+        )
 
-        if route.mode == "knowledge":
+        gemini_started = time.perf_counter()
 
-            products = []
+        answer = await llm_service.generate_response(
+            user_message=message,
+            products=products,
+            mode=mode,
+            conversation_history=history_text,
+            response_style=response_style,
+        )
 
-        elif named_previous_products:
+        gemini_ms = (
+            time.perf_counter() - gemini_started
+        ) * 1000
 
-            products = (
-                named_previous_products
+        conversation_service.add_assistant_message(
+            session_id=session_id,
+            message=answer,
+        )
+
+        if mode == "knowledge":
+            visible_products = []
+        else:
+            visible_products = (
+                self._order_products_by_answer(
+                    products, answer
+                )
             )
 
+            if action == "choose" and limit:
+                mentioned = (
+                    self._products_mentioned_in_answer(
+                        visible_products,
+                        answer,
+                        limit,
+                    )
+                )
+
+                chosen_ids = {
+                    str(p.get("product_id"))
+                    for p in mentioned
+                }
+
+                for product in visible_products:
+                    if len(mentioned) >= limit:
+                        break
+
+                    product_id = str(
+                        product.get("product_id")
+                    )
+
+                    if product_id not in chosen_ids:
+                        mentioned.append(product)
+                        chosen_ids.add(product_id)
+
+                visible_products = mentioned
+
+                conversation_service.set_selected_products(
+                    session_id=session_id,
+                    products=visible_products,
+                )
+
+                if len(visible_products) == 1:
+                    conversation_service.set_focused_product(
+                        session_id=session_id,
+                        product=visible_products[0],
+                    )
+
+        total_ms = (
+            time.perf_counter() - started
+        ) * 1000
+
+        logger.info(
+            "CHAT METRICS | request_id=%s | "
+            "session_id=%s | mode=%s | "
+            "products=%s | intent_ms=%.2f | "
+            "retrieval_ms=%.2f | "
+            "gemini_ms=%.2f | "
+            "chat_total_ms=%.2f",
+            request_id,
+            session_id,
+            mode,
+            len(visible_products),
+            intent_ms,
+            retrieval_ms,
+            gemini_ms,
+            total_ms,
+        )
+
+        return {
+            "answer": answer,
+            "session_id": session_id,
+            "products": [
+                self._serialize_product(product)
+                for product in visible_products
+            ],
+        }
+
+    # =====================================================
+    # NEW: GEMINI-FIRST PRODUCT SELECTION
+    # =====================================================
+
+    def _gemini_products(
+        self,
+        message: str,
+        intent: dict[str, Any],
+        previous_products: list[dict[str, Any]],
+        selected_products: list[dict[str, Any]],
+        focused_product: dict[str, Any] | None,
+        session_id: str,
+    ) -> tuple[list[dict[str, Any]], str, str, int | None]:
+
+        kind = intent.get(
+            "intent", "product_search"
+        )
+        scope = intent.get(
+            "reference_scope", "none"
+        )
+        search_query = intent.get(
+            "search_query", ""
+        ).strip()
+        count = intent.get("count")
+        comparison_count = intent.get(
+            "comparison_count"
+        )
+
+        requested_ids = intent.get(
+            "referenced_product_ids", []
+        )
+
+        limit = count or 5
+        limit = max(1, min(limit, 20))
+
+        mode = (
+            "knowledge"
+            if kind == "knowledge"
+            else "catalog"
+        )
+
+        if mode == "knowledge":
+            return [], mode, "none", None
+
+        products: list[dict[str, Any]] = []
+        used_previous = False
+
+        if requested_ids:
+            allowed = {
+                str(p.get("product_id"))
+                for p in (
+                    previous_products
+                    + selected_products
+                    + (
+                        [focused_product]
+                        if focused_product
+                        else []
+                    )
+                )
+            }
+
+            safe_ids = [
+                product_id
+                for product_id in requested_ids
+                if product_id in allowed
+            ]
+
+            if safe_ids:
+                products = (
+                    retrieval_service
+                    .get_products_by_ids(safe_ids)
+                )
+                used_previous = True
+
+        if not products:
+            if scope == "focused_product":
+                products = (
+                    [focused_product]
+                    if focused_product
+                    else []
+                )
+                used_previous = True
+
+            elif scope == "selected_products":
+                products = list(selected_products)
+                used_previous = True
+
+            elif scope == "previous_results":
+                products = list(previous_products)
+                used_previous = True
+
+        if (
+            not products
+            and kind in {
+                "follow_up",
+                "comparison",
+                "cheapest",
+                "availability",
+                "product_detail",
+            }
+        ):
+            products = (
+                list(selected_products)
+                or (
+                    [focused_product]
+                    if focused_product
+                    else []
+                )
+                or list(previous_products)
+            )
+            used_previous = bool(products)
+
+        if not products:
+            if (
+                kind == "catalog_list"
+                and not search_query
+            ):
+                products = self._catalog_list(
+                    limit=limit
+                )
+            else:
+                filters = self._intent_filters(
+                    intent.get("filters", {})
+                )
+
+                query = (
+                    search_query
+                    or message
+                )
+
+                products = self._retrieve_products(
+                    query=query,
+                    filters=filters,
+                    limit=limit,
+                    strict_match=False,
+                )
+
+                if (
+                    not products
+                    and kind == "catalog_list"
+                ):
+                    products = self._catalog_list(
+                        limit=limit,
+                        filters=filters,
+                    )
+
+        action = "none"
+        selection_limit = None
+
+        if kind == "cheapest":
+            products = self._choose_cheapest(
+                products
+            )
+            if products:
+                conversation_service.set_focused_product(
+                    session_id=session_id,
+                    product=products[0],
+                )
+
+        elif kind == "comparison":
+            selection_limit = (
+                comparison_count or 2
+            )
+
+            if len(products) > selection_limit:
+                products = products[
+                    :selection_limit
+                ]
+
+            if products:
+                conversation_service.set_selected_products(
+                    session_id=session_id,
+                    products=products,
+                )
+
+        elif kind == "recommendation":
+            action = "choose"
+            selection_limit = count or 1
+
+        elif kind in {
+            "availability",
+            "product_detail",
+        }:
+            if len(products) == 1:
+                conversation_service.set_focused_product(
+                    session_id=session_id,
+                    product=products[0],
+                )
+
+        if not used_previous and products:
+            filters = self._intent_filters(
+                intent.get("filters", {})
+            )
+
+            conversation_service.set_search_state(
+                session_id=session_id,
+                products=products,
+                filters=filters,
+                semantic_query=(
+                    search_query or message
+                ),
+            )
+
+        return (
+            products,
+            mode,
+            action,
+            selection_limit,
+        )
+
+    def _catalog_list(
+        self,
+        limit: int,
+        filters: CatalogFilters | None = None,
+    ) -> list[dict[str, Any]]:
+
+        catalog = product_service.products
+
+        if filters is None:
+            return [
+                dict(product)
+                for product in catalog[:limit]
+            ]
+
+        return [
+            dict(product)
+            for product in catalog
+            if retrieval_service._passes_filters(
+                product, filters
+            )
+        ][:limit]
+
+    @staticmethod
+    def _intent_filters(
+        raw: dict[str, Any],
+    ) -> CatalogFilters:
+
+        if not isinstance(raw, dict):
+            raw = {}
+
+        filters = CatalogFilters()
+
+        filters.material = raw.get(
+            "material"
+        )
+        filters.year = raw.get("year")
+        filters.min_price = raw.get(
+            "min_price"
+        )
+        filters.max_price = raw.get(
+            "max_price"
+        )
+
+        if raw.get("in_stock") is True:
+            filters.in_stock = True
+
+        return filters
+
+    # =====================================================
+    # EXISTING: ROUTER COMPATIBILITY
+    # =====================================================
+
+    def _legacy_products(
+        self,
+        message: str,
+        session_id: str,
+        route,
+        previous_products: list[dict[str, Any]],
+        selected_products: list[dict[str, Any]],
+        focused_product: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+
+        if route.mode == "knowledge":
+            return []
+
+        # Recognize named products from previous results.
+        matched = self._match_named_product_reference(
+            message,
+            previous_products,
+        )
+
+        if matched and route.follow_up_type != "refine_search":
+            products = matched
             conversation_service.set_focused_product(
                 session_id=session_id,
                 product=products[0],
             )
 
-        elif (
-            route.follow_up_type
-            == "reuse_focus"
-        ):
-
+        elif route.follow_up_type == "reuse_focus":
             products = (
-                retrieval_service
-                .get_products_by_ids(
-                    [focused_id]
-                )
-                if focused_id
+                [focused_product]
+                if focused_product
                 else []
             )
 
-        elif (
-            route.follow_up_type
-            == "reuse_selection"
-        ):
+        elif route.follow_up_type == "reuse_selection":
+            products = list(selected_products)
 
-            products = (
-                retrieval_service
-                .get_products_by_ids(
-                    selected_ids
-                )
-                if selected_ids
-                else []
+        elif route.follow_up_type == "reuse_results":
+            products = list(previous_products)
+
+        elif route.follow_up_type == "refine_search":
+            old_filters = (
+                conversation_service
+                .get_active_filters(session_id)
             )
 
-        elif (
-            route.follow_up_type
-            == "reuse_results"
-        ):
-
-            products = (
-                retrieval_service
-                .get_products_by_ids(
-                    last_result_ids
-                )
-                if last_result_ids
-                else []
+            filters = retrieval_service.extract_filters(
+                query=message,
+                base_filters=old_filters,
             )
 
-        elif (
-            route.follow_up_type
-            == "refine_search"
-        ):
-
-            new_filters = (
-                retrieval_service
-                .extract_filters(
-                    query=message,
-                    base_filters=active_filters,
-                )
+            previous_query = (
+                conversation_service
+                .get_semantic_query(session_id)
             )
 
-            semantic_query = (
-                self._merge_semantic_query(
-                    previous_semantic_query,
-                    message,
-                )
-            )
-
-            retrieval_start = (
-                time.perf_counter()
+            query = self._merge_semantic_query(
+                previous_query,
+                message,
             )
 
             products = self._retrieve_products(
-                query=semantic_query,
-                filters=new_filters,
+                query=query,
+                filters=filters,
                 limit=5,
                 strict_match=(
                     route.strict_catalog_match
                 ),
             )
 
-            retrieval_ms = (
-                (
-                    time.perf_counter()
-                    - retrieval_start
-                )
-                * 1000
-            )
-
             conversation_service.set_search_state(
                 session_id=session_id,
                 products=products,
-                filters=new_filters,
-                semantic_query=semantic_query,
+                filters=filters,
+                semantic_query=query,
             )
 
         else:
-
-            filters = (
-                retrieval_service
-                .extract_filters(
-                    query=message
-                )
-            )
-
-            retrieval_start = (
-                time.perf_counter()
+            filters = retrieval_service.extract_filters(
+                query=message
             )
 
             products = self._retrieve_products(
@@ -308,14 +640,6 @@ class ChatService:
                 ),
             )
 
-            retrieval_ms = (
-                (
-                    time.perf_counter()
-                    - retrieval_start
-                )
-                * 1000
-            )
-
             conversation_service.set_search_state(
                 session_id=session_id,
                 products=products,
@@ -323,1032 +647,283 @@ class ChatService:
                 semantic_query=message,
             )
 
-        if (
-            route.product_action
-            == "availability"
-        ):
+        if route.product_action == "cheapest":
+            products = self._choose_cheapest(
+                products
+            )
 
+            if products:
+                conversation_service.set_focused_product(
+                    session_id=session_id,
+                    product=products[0],
+                )
+
+        elif route.product_action == "availability":
             products = (
                 self._resolve_referenced_products(
-                    message=message,
-                    products=products,
+                    message, products
                 )
             )
 
             if len(products) == 1:
-
                 conversation_service.set_focused_product(
                     session_id=session_id,
                     product=products[0],
                 )
 
-        elif (
-            route.product_action
-            == "cheapest"
-        ):
+        return products
 
-            products = (
-                self._choose_cheapest(
-                    products
-                )
-            )
+    # =====================================================
+    # SHARED HELPERS
+    # =====================================================
 
-            if products:
-
-                conversation_service.set_focused_product(
-                    session_id=session_id,
-                    product=products[0],
-                )
-
-        conversation_history = (
-            self._format_history(
-                history
-            )
-        )
-
-        conversation_service.add_user_message(
-            session_id=session_id,
-            message=message,
-            mode=route.mode,
-        )
-
-        gemini_start = (
-            time.perf_counter()
-        )
-
-        answer = (
-            await llm_service
-            .generate_response(
-                user_message=message,
-                products=products,
-                mode=route.mode,
-                conversation_history=(
-                    conversation_history
-                ),
-                response_style=(
-                    route.response_style
-                ),
-            )
-        )
-
-        gemini_ms = (
-            (
-                time.perf_counter()
-                - gemini_start
-            )
-            * 1000
-        )
-
-        chat_total_ms = (
-            (
-                time.perf_counter()
-                - chat_start_time
-            )
-            * 1000
-        )
-
-        logger.info(
-            "CHAT METRICS | "
-            "request_id=%s | "
-            "session_id=%s | "
-            "mode=%s | "
-            "follow_up=%s | "
-            "follow_up_type=%s | "
-            "action=%s | "
-            "products=%s | "
-            "retrieval_ms=%.2f | "
-            "gemini_ms=%.2f | "
-            "chat_total_ms=%.2f",
-            request_id,
-            session_id,
-            route.mode,
-            route.is_follow_up,
-            route.follow_up_type,
-            route.product_action,
-            len(products),
-            retrieval_ms,
-            gemini_ms,
-            chat_total_ms,
-        )
-
-        conversation_service.add_assistant_message(
-            session_id=session_id,
-            message=answer,
-        )
-
-        if route.mode == "knowledge":
-
-            return {
-                "answer": answer,
-                "session_id": session_id,
-                "products": [],
-            }
-
-        ordered_products = (
-            self._order_products_by_answer(
-                products=products,
-                answer=answer,
-            )
-        )
-
-        if (
-            route.product_action
-            == "choose"
-            and route.selection_limit
-            is not None
-        ):
-
-            selected_products = (
-                self._products_mentioned_in_answer(
-                    products=ordered_products,
-                    answer=answer,
-                    limit=(
-                        route.selection_limit
-                    ),
-                )
-            )
-
-            if (
-                len(selected_products)
-                < route.selection_limit
-            ):
-
-                already_selected = {
-                    str(
-                        product.get(
-                            "product_id"
-                        )
-                    )
-                    for product
-                    in selected_products
-                }
-
-                for product in ordered_products:
-
-                    product_id = str(
-                        product.get(
-                            "product_id"
-                        )
-                    )
-
-                    if (
-                        product_id
-                        in already_selected
-                    ):
-                        continue
-
-                    selected_products.append(
-                        product
-                    )
-
-                    already_selected.add(
-                        product_id
-                    )
-
-                    if (
-                        len(selected_products)
-                        >= route.selection_limit
-                    ):
-                        break
-
-            conversation_service.set_selected_products(
-                session_id=session_id,
-                products=selected_products,
-            )
-
-            if (
-                len(selected_products)
-                == 1
-            ):
-
-                conversation_service.set_focused_product(
-                    session_id=session_id,
-                    product=selected_products[0],
-                )
-
-            ordered_products = (
-                selected_products
-            )
-
-        return {
-            "answer": answer,
-            "session_id": session_id,
-            "products": [
-                self._serialize_product(
-                    product
-                )
-                for product
-                in ordered_products
-            ],
-        }
-
+    @staticmethod
     def _retrieve_products(
-        self,
         query: str,
-        filters,
+        filters: CatalogFilters,
         limit: int,
         strict_match: bool,
-    ) -> list[
-        dict[str, Any]
-    ]:
+    ) -> list[dict[str, Any]]:
 
         try:
-
             return retrieval_service.retrieve(
                 query=query,
                 filters=filters,
                 limit=limit,
                 strict_match=strict_match,
             )
-
         except RetrievalServiceError:
-
             raise
-
         except Exception as exc:
-
             logger.exception(
                 "PRODUCT RETRIEVAL ERROR | "
                 "error_type=%s",
                 type(exc).__name__,
             )
-
             raise RetrievalServiceError(
                 "Product retrieval failed."
             ) from exc
 
     @staticmethod
-    def _looks_like_named_product_follow_up(
-        message: str,
-    ) -> bool:
-
-        text = " ".join(
-            re.findall(
-                r"[a-z0-9]+",
-                message.lower(),
-            )
-        )
-
-        if not text:
-            return False
-
-        follow_up_phrases = (
-            "learn more",
-            "tell me more",
-            "tell me about",
-            "more details",
-            "more detail",
-            "more information",
-            "details about",
-            "details on",
-            "information about",
-            "information on",
-            "what about",
-            "how about",
-            "price",
-            "cost",
-            "purity",
-            "weight",
-            "material",
-            "year",
-            "in stock",
-            "out of stock",
-            "available",
-            "availability",
-        )
-
-        if any(
-            phrase in text
-            for phrase
-            in follow_up_phrases
-        ):
-            return True
-
-        return (
-            len(
-                text.split()
-            )
-            <= 6
-        )
-
-    @classmethod
-    def _match_named_product_reference(
-        cls,
-        message: str,
-        products: list[
-            dict[str, Any]
-        ],
-    ) -> list[
-        dict[str, Any]
-    ]:
-
-        if not products:
-            return []
-
-        message_tokens = (
-            cls._reference_tokens(
-                message
-            )
-        )
-
-        if not message_tokens:
-            return []
-
-        message_set = set(
-            message_tokens
-        )
-
-        normalized_message = (
-            " ".join(
-                message_tokens
-            )
-        )
-
-        generic_name_tokens = {
-            "coin",
-            "coins",
-            "product",
-            "products",
-            "collectible",
-            "collectibles",
-            "edition",
-            "piece",
-        }
-
-        prepared: list[
-            tuple[
-                dict[str, Any],
-                list[str],
-                list[str],
-            ]
-        ] = []
-
-        token_frequency: dict[
-            str,
-            int,
-        ] = {}
-
-        for product in products:
-
-            name = str(
-                product.get(
-                    "name",
-                    "",
-                )
-            ).strip()
-
-            if not name:
-                continue
-
-            name_tokens = (
-                cls._reference_tokens(
-                    name
-                )
-            )
-
-            significant = [
-                token
-                for token
-                in name_tokens
-                if (
-                    token
-                    not in generic_name_tokens
-                    and not token.isdigit()
-                )
-            ]
-
-            if not significant:
-                continue
-
-            prepared.append(
-                (
-                    product,
-                    name_tokens,
-                    significant,
-                )
-            )
-
-            for token in set(
-                significant
-            ):
-
-                token_frequency[
-                    token
-                ] = (
-                    token_frequency.get(
-                        token,
-                        0,
-                    )
-                    + 1
-                )
-
-        candidates: list[
-            tuple[
-                float,
-                dict[str, Any],
-            ]
-        ] = []
-
-        for (
-            product,
-            name_tokens,
-            significant,
-        ) in prepared:
-
-            normalized_name = (
-                " ".join(
-                    name_tokens
-                )
-            )
-
-            if (
-                normalized_name
-                and normalized_name
-                in normalized_message
-            ):
-
-                candidates.append(
-                    (
-                        10000.0,
-                        product,
-                    )
-                )
-
-                continue
-
-            overlap = (
-                set(
-                    significant
-                )
-                & message_set
-            )
-
-            overlap_count = len(
-                overlap
-            )
-
-            if overlap_count == 0:
-                continue
-
-            strong_match = (
-                overlap_count >= 2
-            )
-
-            single_unique_match = False
-
-            if overlap_count == 1:
-
-                token = next(
-                    iter(
-                        overlap
-                    )
-                )
-
-                single_unique_match = (
-                    len(token) >= 5
-                    and token_frequency.get(
-                        token,
-                        0,
-                    )
-                    == 1
-                )
-
-            if not (
-                strong_match
-                or single_unique_match
-            ):
-                continue
-
-            coverage = (
-                overlap_count
-                / max(
-                    len(
-                        set(
-                            significant
-                        )
-                    ),
-                    1,
-                )
-            )
-
-            ordered_bonus = 0.0
-
-            for size in range(
-                min(
-                    4,
-                    len(
-                        significant
-                    ),
-                ),
-                1,
-                -1,
-            ):
-
-                phrase_found = any(
-                    " ".join(
-                        significant[
-                            start:
-                            start + size
-                        ]
-                    )
-                    in normalized_message
-                    for start in range(
-                        len(significant)
-                        - size
-                        + 1
-                    )
-                )
-
-                if phrase_found:
-
-                    ordered_bonus = (
-                        size
-                        * 25.0
-                    )
-
-                    break
-
-            score = (
-                overlap_count
-                * 100.0
-                + coverage
-                * 20.0
-                + ordered_bonus
-            )
-
-            candidates.append(
-                (
-                    score,
-                    product,
-                )
-            )
-
-        if not candidates:
-            return []
-
-        candidates.sort(
-            key=lambda item:
-                item[0],
-            reverse=True,
-        )
-
-        best_score = (
-            candidates[0][0]
-        )
-
-        best_products = [
-            product
-            for score, product
-            in candidates
-            if abs(
-                score
-                - best_score
-            )
-            < 0.0001
-        ]
-
-        if len(best_products) != 1:
-            return []
-
-        return [
-            best_products[0]
-        ]
-
-    @staticmethod
-    def _contains_availability_request(
-        message: str,
-    ) -> bool:
-
-        text = message.lower()
-
-        return any(
-            phrase in text
-            for phrase in (
-                "in stock",
-                "out of stock",
-                "available",
-                "availability",
-            )
-        )
-
-    @staticmethod
-    def _reference_tokens(
-        text: str,
-    ) -> list[str]:
-
-        return re.findall(
-            r"[a-z0-9]+",
-            text.lower(),
-        )
-
-    def _resolve_referenced_products(
-        self,
-        message: str,
-        products: list[
-            dict[str, Any]
-        ],
-    ) -> list[
-        dict[str, Any]
-    ]:
-
-        if not products:
-            return []
-
-        text = message.lower()
-
-        if re.search(
-            r"\b("
-            r"cheaper one"
-            r"|cheapest one"
-            r")\b",
-            text,
-        ):
-
-            return (
-                self._choose_cheapest(
-                    products
-                )
-            )
-
-        if re.search(
-            r"\b("
-            r"more expensive one"
-            r"|expensive one"
-            r"|most expensive one"
-            r")\b",
-            text,
-        ):
-
-            return (
-                self._choose_most_expensive(
-                    products
-                )
-            )
-
-        if re.search(
-            r"\bfirst one\b",
-            text,
-        ):
-            return products[:1]
-
-        if re.search(
-            r"\bsecond one\b",
-            text,
-        ):
-            return (
-                products[1:2]
-                if len(products) >= 2
-                else []
-            )
-
-        if re.search(
-            r"\bthird one\b",
-            text,
-        ):
-            return (
-                products[2:3]
-                if len(products) >= 3
-                else []
-            )
-
-        if len(products) == 1:
-            return products
-
-        return products
-
-    @staticmethod
-    def _choose_cheapest(
-        products: list[
-            dict[str, Any]
-        ],
-    ) -> list[
-        dict[str, Any]
-    ]:
-
-        priced = []
-
-        for product in products:
-
-            try:
-
-                price = float(
-                    product.get(
-                        "price"
-                    )
-                )
-
-            except (
-                TypeError,
-                ValueError,
-            ):
-                continue
-
-            priced.append(
-                (
-                    price,
-                    product,
-                )
-            )
-
-        if not priced:
-            return []
-
-        priced.sort(
-            key=lambda item:
-                item[0]
-        )
-
-        return [
-            priced[0][1]
-        ]
-
-    @staticmethod
-    def _choose_most_expensive(
-        products: list[
-            dict[str, Any]
-        ],
-    ) -> list[
-        dict[str, Any]
-    ]:
-
-        priced = []
-
-        for product in products:
-
-            try:
-
-                price = float(
-                    product.get(
-                        "price"
-                    )
-                )
-
-            except (
-                TypeError,
-                ValueError,
-            ):
-                continue
-
-            priced.append(
-                (
-                    price,
-                    product,
-                )
-            )
-
-        if not priced:
-            return []
-
-        priced.sort(
-            key=lambda item:
-                item[0],
-            reverse=True,
-        )
-
-        return [
-            priced[0][1]
-        ]
-
-    @staticmethod
-    def _merge_semantic_query(
-        previous_query: str,
-        new_message: str,
-    ) -> str:
-
-        previous_query = (
-            previous_query.strip()
-        )
-
-        new_message = (
-            new_message.strip()
-        )
-
-        if not previous_query:
-            return new_message
-
-        if not new_message:
-            return previous_query
-
-        return (
-            f"{previous_query}. "
-            f"{new_message}"
-        )
-
-    @staticmethod
-    def _format_history(
-        history,
-    ) -> str:
-
+    def _format_history(history) -> str:
         if not history:
             return ""
 
         return "\n".join(
             (
                 "Customer"
-                if turn.role
-                == "user"
+                if turn.role == "user"
                 else "Assistant"
             )
             + ": "
             + turn.content
-
-            for turn
-            in history
+            for turn in history
         )
 
     @staticmethod
-    def _products_mentioned_in_answer(
-        products: list[
-            dict[str, Any]
-        ],
-        answer: str,
-        limit: int,
-    ) -> list[
-        dict[str, Any]
-    ]:
+    def _choose_cheapest(
+        products: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
 
-        answer_lower = (
-            answer.lower()
-        )
-
-        found = []
+        priced = []
 
         for product in products:
-
-            name = str(
-                product.get(
-                    "name",
-                    "",
+            try:
+                price = float(
+                    product.get("price")
                 )
-            ).strip()
-
-            if not name:
+            except (TypeError, ValueError):
                 continue
 
-            position = (
-                answer_lower.find(
-                    name.lower()
-                )
+            priced.append(
+                (price, product)
             )
 
-            if position >= 0:
-
-                found.append(
-                    (
-                        position,
-                        product,
-                    )
-                )
-
-        found.sort(
-            key=lambda item:
-                item[0]
-        )
+        if not priced:
+            return []
 
         return [
-            product
-            for _, product
-            in found[:limit]
+            min(priced, key=lambda item: item[0])[1]
         ]
 
     @staticmethod
-    def _order_products_by_answer(
-        products: list[
-            dict[str, Any]
-        ],
-        answer: str,
-    ) -> list[
-        dict[str, Any]
-    ]:
+    def _merge_semantic_query(
+        previous_query: str,
+        message: str,
+    ) -> str:
 
-        answer_lower = (
-            answer.lower()
+        if not previous_query:
+            return message
+
+        return (
+            previous_query.strip()
+            + " "
+            + message.strip()
         )
 
-        ranked = []
+    @staticmethod
+    def _match_named_product_reference(
+        message: str,
+        products: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
 
-        for (
-            original_index,
-            product,
-        ) in enumerate(
-            products
-        ):
+        import re
 
+        ignored = {
+            "coin", "coins", "product",
+            "products", "piece", "pieces",
+            "silver", "gold", "the", "and",
+            "2023", "2024", "2025", "2026",
+        }
+
+        words = set(
+            re.findall(
+                r"[a-z0-9]+",
+                message.lower(),
+            )
+        )
+
+        matches = []
+
+        for product in products:
             name = str(
-                product.get(
-                    "name",
-                    "",
-                )
-            ).strip()
+                product.get("name", "")
+            ).lower()
 
-            position = (
-                answer_lower.find(
-                    name.lower()
+            tokens = set(
+                re.findall(
+                    r"[a-z0-9]+", name
                 )
-                if name
-                else -1
+            ) - ignored
+
+            if (
+                tokens
+                and len(tokens & words) >= 1
+            ):
+                matches.append(product)
+
+        return (
+            matches
+            if len(matches) == 1
+            else []
+        )
+
+    def _resolve_referenced_products(
+        self,
+        message: str,
+        products: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+
+        text = message.lower()
+
+        if (
+            "cheaper one" in text
+            or "cheapest one" in text
+        ):
+            return self._choose_cheapest(
+                products
             )
 
-            if position >= 0:
+        if (
+            "expensive one" in text
+            or "most expensive" in text
+        ):
+            try:
+                return [
+                    max(
+                        products,
+                        key=lambda p: float(
+                            p["price"]
+                        ),
+                    )
+                ]
+            except (ValueError, KeyError, TypeError):
+                return []
 
-                key = (
-                    0,
-                    position,
-                    original_index,
+        if "first one" in text:
+            return products[:1]
+
+        if "second one" in text:
+            return products[1:2]
+
+        return products
+
+    @staticmethod
+    def _products_mentioned_in_answer(
+        products: list[dict[str, Any]],
+        answer: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+
+        lower = answer.lower()
+
+        return [
+            product
+            for product in products
+            if str(
+                product.get("name", "")
+            ).lower() in lower
+        ][:limit]
+
+    @staticmethod
+    def _order_products_by_answer(
+        products: list[dict[str, Any]],
+        answer: str,
+    ) -> list[dict[str, Any]]:
+
+        lower = answer.lower()
+
+        indexed = list(
+            enumerate(products)
+        )
+
+        indexed.sort(
+            key=lambda item: (
+                0
+                if str(
+                    item[1].get("name", "")
+                ).lower() in lower
+                else 1,
+                lower.find(
+                    str(
+                        item[1].get("name", "")
+                    ).lower()
                 )
-
-            else:
-
-                key = (
-                    1,
-                    original_index,
-                    original_index,
-                )
-
-            ranked.append(
-                (
-                    key,
-                    product,
-                )
+                if str(
+                    item[1].get("name", "")
+                ).lower() in lower
+                else item[0],
+                item[0],
             )
-
-        ranked.sort(
-            key=lambda item:
-                item[0]
         )
 
         return [
             product
-            for _, product
-            in ranked
+            for _, product in indexed
         ]
 
     @staticmethod
     def _serialize_product(
-        product: dict[
-            str,
-            Any,
-        ],
-    ) -> dict[
-        str,
-        Any,
-    ]:
+        product: dict[str, Any],
+    ) -> dict[str, Any]:
+
+        fields = (
+            "product_id",
+            "name",
+            "category",
+            "year",
+            "material",
+            "weight",
+            "purity",
+            "price",
+            "currency",
+            "description",
+            "product_url",
+        )
 
         return {
-            "product_id":
-                product.get(
-                    "product_id"
-                ),
-
-            "name":
-                product.get(
-                    "name"
-                ),
-
-            "category":
-                product.get(
-                    "category"
-                ),
-
-            "year":
-                product.get(
-                    "year"
-                ),
-
-            "material":
-                product.get(
-                    "material"
-                ),
-
-            "weight":
-                product.get(
-                    "weight"
-                ),
-
-            "purity":
-                product.get(
-                    "purity"
-                ),
-
-            "price":
-                product.get(
-                    "price"
-                ),
-
-            "currency":
-                product.get(
-                    "currency"
-                ),
-
-            "description":
-                product.get(
-                    "description"
-                ),
-
-            "product_url":
-                product.get(
-                    "product_url"
-                ),
+            field: product.get(field)
+            for field in fields
         }
 
 

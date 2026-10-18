@@ -1,3 +1,4 @@
+
 import json
 import re
 from typing import Any
@@ -6,226 +7,283 @@ from app.core.config import PRODUCT_FILE
 
 
 class ProductService:
+    """
+    Read and search the real Biddix product catalog.
 
-    def __init__(self):
+    Gemini understands the customer's language.
+    Python checks actual catalog facts.
+    """
 
+    def __init__(self) -> None:
         with open(
             PRODUCT_FILE,
             "r",
             encoding="utf-8",
         ) as file:
-            self.products: list[
-                dict[str, Any]
-            ] = json.load(file)
+            data = json.load(file)
+
+        if not isinstance(data, list):
+            raise ValueError(
+                "Product catalog must contain a list."
+            )
+
+        self.products: list[dict[str, Any]] = data
+
+        self.products_by_id = {
+            str(product["product_id"]): product
+            for product in self.products
+            if isinstance(product, dict)
+            and product.get("product_id") is not None
+        }
+
+    # =====================================================
+    # DIRECT CATALOG OPERATIONS
+    # =====================================================
+
+    def get_product_by_id(
+        self,
+        product_id: str,
+    ) -> dict[str, Any] | None:
+        return self.products_by_id.get(
+            str(product_id)
+        )
+
+    def get_products_by_ids(
+        self,
+        product_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        return [
+            product
+            for product_id in product_ids
+            if (
+                product := self.get_product_by_id(
+                    product_id
+                )
+            ) is not None
+        ]
+
+    def list_products(
+        self,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+
+        return self.products[:limit]
+
+    # =====================================================
+    # GEMINI STRUCTURED-FILTER SEARCH
+    # =====================================================
+
+    def filter_products(
+        self,
+        filters: dict[str, Any] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """
+        Apply structured filters to real catalog items.
+
+        No customer keyword patterns are required.
+        """
+
+        if limit <= 0:
+            return []
+
+        filters = filters or {}
+
+        if not isinstance(filters, dict):
+            raise ValueError(
+                "Product filters must be a dictionary."
+            )
+
+        material = filters.get("material")
+        year = filters.get("year")
+        min_price = filters.get("min_price")
+        max_price = filters.get("max_price")
+        in_stock = filters.get("in_stock")
+
+        if isinstance(material, str):
+            material = material.strip().lower()
+        else:
+            material = None
+
+        results = []
+
+        for product in self.products:
+            if not isinstance(product, dict):
+                continue
+
+            if material:
+                product_material = str(
+                    product.get("material", "")
+                ).strip().lower()
+
+                if product_material != material:
+                    continue
+
+            if year is not None:
+                try:
+                    product_year = int(
+                        product.get("year")
+                    )
+                except (ValueError, TypeError):
+                    continue
+
+                if product_year != year:
+                    continue
+
+            try:
+                price = float(
+                    product.get("price")
+                )
+            except (ValueError, TypeError):
+                continue
+
+            if min_price is not None:
+                if price < float(min_price):
+                    continue
+
+            if max_price is not None:
+                if price > float(max_price):
+                    continue
+
+            if in_stock is True:
+                if (
+                    product.get(
+                        "availability_confirmed"
+                    )
+                    is not True
+                ):
+                    continue
+
+                try:
+                    stock = int(
+                        product.get("stock", 0)
+                    )
+                except (TypeError, ValueError):
+                    continue
+
+                if stock <= 0:
+                    continue
+
+            results.append(product)
+
+            if len(results) >= limit:
+                break
+
+        return results
+
+    # =====================================================
+    # EXISTING SEARCH INTERFACE
+    #
+    # Kept for older callers and regression tests.
+    # =====================================================
 
     def search_products(
         self,
         query: str,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
 
-        query_lower = (
-            query
-            .lower()
-            .strip()
-        )
+        text = query.lower().strip()
 
-        # -----------------------------------
-        # 1. Extract structured filters
-        # -----------------------------------
-
-        year = self._extract_year(
-            query_lower
-        )
-
-        max_price = self._extract_max_price(
-            query_lower
-        )
-
-        min_price = self._extract_min_price(
-            query_lower
-        )
-
-        material = self._extract_material(
-            query_lower
-        )
-
-        wants_in_stock = any(
-            phrase in query_lower
-            for phrase in (
-                "in stock",
-                "available",
-                "availability",
-            )
-        )
-
-        results = []
-
-        # -----------------------------------
-        # 2. Filter products
-        # -----------------------------------
-
-        for product in self.products:
-
-            # YEAR
-            if year is not None:
-
-                try:
-                    product_year = int(
-                        product.get(
-                            "year"
-                        )
-                    )
-                except (
-                    TypeError,
-                    ValueError,
-                ):
-                    continue
-
-                if product_year != year:
-                    continue
-
-            # MATERIAL
-            if material is not None:
-
-                product_material = str(
-                    product.get(
-                        "material",
-                        "",
-                    )
-                ).strip().lower()
-
-                if (
-                    product_material
-                    != material.lower()
-                ):
-                    continue
-
-            # PRICE
-            try:
-                price = float(
-                    product.get(
-                        "price",
-                        0,
+        filters = {
+            "year": self._extract_year(text),
+            "min_price": self._extract_min_price(text),
+            "max_price": self._extract_max_price(text),
+            "material": self._extract_material(text),
+            "in_stock": (
+                any(
+                    phrase in text
+                    for phrase in (
+                        "in stock",
+                        "available",
+                        "availability",
                     )
                 )
-            except (
-                TypeError,
-                ValueError,
-            ):
-                continue
+            ),
+        }
 
-            if (
-                max_price is not None
-                and price > max_price
-            ):
-                continue
+        candidates = self.filter_products(
+            filters=filters,
+            limit=len(self.products),
+        )
 
-            if (
-                min_price is not None
-                and price < min_price
-            ):
-                continue
+        query_words = self._useful_words(text)
 
-            # STOCK
-            if wants_in_stock:
+        ranked = []
 
-                try:
-                    stock = int(
-                        product.get(
-                            "stock",
-                            0,
-                        )
-                    )
-                except (
-                    TypeError,
-                    ValueError,
-                ):
-                    stock = 0
-
-                if stock <= 0:
-                    continue
-
-            results.append(
+        for index, product in enumerate(candidates):
+            product_text = self._product_text(
                 product
-            )
-
-        # -----------------------------------
-        # 3. Keyword ranking
-        # -----------------------------------
-
-        query_words = self._useful_words(
-            query_lower
-        )
-
-        scored_products = []
-
-        for product in results:
-
-            searchable_text = (
-                self._product_text(
-                    product
-                )
             )
 
             score = sum(
                 1
                 for word in query_words
-                if word in searchable_text
+                if word in product_text
             )
 
-            scored_products.append(
-                (
-                    score,
-                    product,
-                )
+            ranked.append(
+                (score, index, product)
             )
 
-        scored_products.sort(
-            key=lambda item: item[0],
-            reverse=True,
+        ranked.sort(
+            key=lambda item: (
+                -item[0],
+                item[1],
+            )
         )
 
         return [
             product
-            for _, product
-            in scored_products[:limit]
+            for _, _, product
+            in ranked[:limit]
         ]
+
+    # =====================================================
+    # COMPATIBLE LEGACY FILTER HELPERS
+    # =====================================================
 
     @staticmethod
     def _extract_year(
         query: str,
     ) -> int | None:
-
         match = re.search(
-            r"\b(19|20)\d{2}\b",
+            r"\b(?:19|20)\d{2}\b",
             query,
         )
 
-        if not match:
-            return None
-
-        return int(
-            match.group()
+        return (
+            int(match.group())
+            if match
+            else None
         )
 
     @staticmethod
     def _extract_max_price(
         query: str,
     ) -> float | None:
-
-        patterns = [
-            r"budget(?:\s+is|\s+of)?\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"under\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"below\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"less than\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"up to\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"maximum\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"max\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-        ]
+        patterns = (
+            r"\bbudget(?:\s+is|\s+of)?\s*"
+            r"(?:aed\s*)?(\d+(?:\.\d+)?)",
+            r"\bunder\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+            r"\bbelow\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+            r"\bless than\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+            r"\bup to\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+            r"\bmaximum\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+            r"\bmax\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+        )
 
         for pattern in patterns:
-
             match = re.search(
                 pattern,
                 query,
@@ -233,29 +291,25 @@ class ProductService:
             )
 
             if match:
-                return float(
-                    match.group(1)
-                )
-
-        # Example:
-        # "500 AED budget"
+                return float(match.group(1))
 
         match = re.search(
-            r"(\d+(?:\.\d+)?)\s*aed",
+            r"\b(\d+(?:\.\d+)?)\s*aed\b",
             query,
             re.IGNORECASE,
         )
 
-        if match and (
-            "budget" in query
-            or "under" in query
-            or "below" in query
-            or "maximum" in query
-            or "max" in query
-        ):
-            return float(
-                match.group(1)
+        if match and any(
+            word in query
+            for word in (
+                "budget",
+                "under",
+                "below",
+                "maximum",
+                "max",
             )
+        ):
+            return float(match.group(1))
 
         return None
 
@@ -263,19 +317,24 @@ class ProductService:
     def _extract_min_price(
         query: str,
     ) -> float | None:
-
-        patterns = [
-            r"greater than\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"more than\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"over\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"above\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"minimum\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"at least\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-            r"starting from\s*(?:aed)?\s*(\d+(?:\.\d+)?)",
-        ]
+        patterns = (
+            r"\bgreater than\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+            r"\bmore than\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+            r"\bover\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+            r"\babove\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+            r"\bminimum\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+            r"\bat least\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+            r"\bstarting from\s*(?:aed\s*)?"
+            r"(\d+(?:\.\d+)?)",
+        )
 
         for pattern in patterns:
-
             match = re.search(
                 pattern,
                 query,
@@ -283,9 +342,7 @@ class ProductService:
             )
 
             if match:
-                return float(
-                    match.group(1)
-                )
+                return float(match.group(1))
 
         return None
 
@@ -293,18 +350,21 @@ class ProductService:
     def _extract_material(
         query: str,
     ) -> str | None:
-
-        materials = [
+        # Legacy compatibility only.
+        # Gemini-first requests use filter_products().
+        materials = (
             "silver",
             "gold",
             "copper",
             "bronze",
             "platinum",
-        ]
+        )
 
         for material in materials:
-
-            if material in query:
+            if re.search(
+                rf"\b{re.escape(material)}\b",
+                query,
+            ):
                 return material
 
         return None
@@ -313,99 +373,37 @@ class ProductService:
     def _product_text(
         product: dict[str, Any],
     ) -> str:
+        fields = (
+            "name",
+            "category",
+            "country",
+            "region",
+            "theme",
+            "era",
+            "material",
+            "year",
+            "description",
+        )
 
-        return " ".join([
-            str(
-                product.get(
-                    "name",
-                    "",
-                )
-            ),
-            str(
-                product.get(
-                    "category",
-                    "",
-                )
-            ),
-            str(
-                product.get(
-                    "country",
-                    "",
-                )
-            ),
-            str(
-                product.get(
-                    "region",
-                    "",
-                )
-            ),
-            str(
-                product.get(
-                    "theme",
-                    "",
-                )
-            ),
-            str(
-                product.get(
-                    "era",
-                    "",
-                )
-            ),
-            str(
-                product.get(
-                    "material",
-                    "",
-                )
-            ),
-            str(
-                product.get(
-                    "year",
-                    "",
-                )
-            ),
-            str(
-                product.get(
-                    "description",
-                    "",
-                )
-            ),
-        ]).lower()
+        return " ".join(
+            str(product.get(field, ""))
+            for field in fields
+        ).lower()
 
     @staticmethod
     def _useful_words(
         query: str,
     ) -> list[str]:
-
         ignored_words = {
-            "i",
-            "am",
-            "a",
-            "an",
-            "the",
-            "for",
-            "from",
-            "my",
-            "is",
-            "are",
-            "show",
-            "me",
-            "all",
-            "looking",
-            "want",
-            "need",
-            "and",
-            "that",
-            "them",
-            "between",
-            "explain",
-            "available",
-            "in",
-            "stock",
-            "aed",
-            "coin",
-            "coins",
-            "product",
-            "products",
+            "i", "am", "a", "an", "the",
+            "for", "from", "my", "is",
+            "are", "show", "me", "all",
+            "looking", "want", "need",
+            "and", "that", "them",
+            "between", "explain",
+            "available", "in", "stock",
+            "aed", "coin", "coins",
+            "product", "products",
         }
 
         return [
@@ -414,13 +412,9 @@ class ProductService:
                 r"[a-z0-9]+",
                 query,
             )
-            if (
-                len(word) > 1
-                and word
-                not in ignored_words
-            )
+            if len(word) > 1
+            and word not in ignored_words
         ]
 
 
 product_service = ProductService()
-
