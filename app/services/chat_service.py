@@ -4,7 +4,7 @@ import os
 import time
 import uuid
 from typing import Any
-
+from app.services.grounding_service import grounding_service
 from app.core.exceptions import RetrievalServiceError
 from app.services.conversation_service import (
     CatalogFilters,
@@ -204,6 +204,13 @@ class ChatService:
         gemini_ms = (
             time.perf_counter() - gemini_started
         ) * 1000
+
+        answer = grounding_service.ground_response(
+            answer=answer,
+            products=products,
+            mode=mode,
+            request_id=request_id,
+        )
 
         conversation_service.add_assistant_message(
             session_id=session_id,
